@@ -1751,7 +1751,7 @@ async function handleApi(request, env, url, ctx) {
                      biz_content: JSON.stringify({
                          out_trade_no: order.id,
                          total_amount: order.total_amount,
-                         subject: `JM166订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
+                         subject: `hltx订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
                      })
                  };
                  params.sign = await signAlipay(params, config.private_key);
