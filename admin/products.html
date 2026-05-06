@@ -139,8 +139,9 @@
         .v-sales-wrap { width: 60px; }
         .v-wholesale_config { width: 100px;}
 
-        /* ================== 响应式适配 ================== */
+        .product-name-truncate { max-width: 600px; } 
         @media (max-width: 800px) {
+            .product-name-truncate { max-width: 200px; } 
             .admin-mobile-header { display: flex; }
             .admin-sidebar { left: -240px; z-index: 1002; }
             .admin-sidebar.is-visible { left: 0; }
@@ -356,7 +357,7 @@
             <tr>
                 <td style="text-align: center;"><input class="form-check-input p-check" type="checkbox" value="${p.id}" onchange="updateBatchBtn()"></td>
                 <td>${p.id}</td>
-                <td><div class="fw-bold text-truncate" style="max-width: 200px;">${p.name}</div><small class="text-muted">${category.name}</small></td>
+                <td><div class="fw-bold text-truncate product-name-truncate">${p.name}</div><small class="text-muted">${category.name}</small></td>
                 <td class="text-center"><span class="badge bg-info text-dark">${p.variants.length}</span></td>
                 <td class="text-center">${stockHtml}</td>
                 <td class="text-center">${p.sort}</td>
