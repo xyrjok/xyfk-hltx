@@ -154,7 +154,7 @@
                 <select class="form-select form-select-sm" id="filter-status" style="width: 130px;" onchange="loadOrders()">
                     <option value="">所有状态</option>
                     <option value="0">待支付</option>
-                    <option value="1">已支付/已发货</option>
+                    <option value="1">待发货</option>
                     <option value="2">已完成</option>
                 </select>
                 <div class="input-group input-group-sm" style="width: 250px;">
@@ -253,7 +253,8 @@
                     <label class="form-label">订单状态</label>
                     <select class="form-select" id="e-status">
                         <option value="0">待支付 (Pending)</option>
-                        <option value="1">已支付/已发货 (Paid)</option>
+                        <option value="1">待发货 (Pending Delivery)</option>
+                        <option value="2">已完成 (Completed)</option>
                         <option value="-1">已关闭/过期 (Closed)</option>
                     </select>
                 </div>
@@ -261,8 +262,12 @@
                     <label class="form-label">联系方式</label>
                     <input type="text" class="form-control" id="e-contact">
                 </div>
+                <div class="mb-3">
+                    <label class="form-label">卡密信息 (一行一个)</label>
+                    <textarea class="form-control" id="e-cards" rows="4" placeholder="在此输入卡密信息用于手动发货..."></textarea>
+                </div>
                 <div class="alert alert-warning" style="font-size: 12px;">
-                    <i class="fas fa-exclamation-triangle"></i> 注意：手动修改订单状态不会触发自动发货或退款逻辑，仅修改数据库记录。
+                    <i class="fas fa-exclamation-triangle"></i> 注意：手动发货请直接在此填写卡密，并将状态改为“已完成(Completed)”然后保存即可。
                 </div>
             </div>
             <div class="modal-footer">
@@ -348,7 +353,7 @@
 
         const html = list.map(o => {
             let statusBadge = '<span class="status-badge status-closed">未知</span>';
-            if(o.status == 1) statusBadge = '<span class="status-badge status-paid">已支付</span>';
+            if(o.status == 1) statusBadge = '<span class="status-badge status-pending" style="color: #fff; background-color: #dc3545; border-color: #dc3545;">待发货</span>';
             else if(o.status == 0) statusBadge = '<span class="status-badge status-pending">待支付</span>';
             else if(o.status == 2) statusBadge = '<span class="status-badge status-paid">已完成</span>';
             else if(o.status == -1) statusBadge = '<span class="status-badge status-closed">已关闭</span>';
@@ -429,6 +434,19 @@
         document.getElementById('e-id').value = o.id;
         document.getElementById('e-status').value = o.status;
         document.getElementById('e-contact').value = o.contact || '';
+        
+        // 解析已经存在的卡密
+        let cardsVal = '';
+        if (o.cards_sent && o.cards_sent !== '[]' && o.cards_sent !== 'null') {
+            try {
+                let parsed = JSON.parse(o.cards_sent);
+                cardsVal = Array.isArray(parsed) ? parsed.join('\n') : parsed;
+            } catch(e) {
+                cardsVal = o.cards_sent; // 若不是JSON，直接填入
+            }
+        }
+        document.getElementById('e-cards').value = cardsVal;
+        
         editModal.show();
     }
 
@@ -436,10 +454,11 @@
         const id = document.getElementById('e-id').value;
         const status = parseInt(document.getElementById('e-status').value);
         const contact = document.getElementById('e-contact').value;
+        const cards_sent = document.getElementById('e-cards').value; // 获取卡密
         
         const res = await api('order/save', { 
             method: 'POST', 
-            body: JSON.stringify({ id, status, contact }) 
+            body: JSON.stringify({ id, status, contact, cards_sent }) 
         });
         
         if(res.success) {
