@@ -1135,7 +1135,10 @@ async function handleApi(request, env, url, ctx) {
                     const formData = await request.formData();
                     const file = formData.get('file');
                     if (!file) return errRes('未选择文件');
-                    const filename = 'image/' + Date.now() + '_' + file.name;
+                    const extMatch = file.name.match(/\.(jpg|jpeg|png|gif|webp|ico|svg)$/i);
+                    if (!extMatch) return errRes('由于安全策略，仅允许上传合法图片格式');
+                    const safeFilename = crypto.randomUUID().replace(/-/g, '') + extMatch[0].toLowerCase();
+                    const filename = 'image/' + Date.now() + '_' + safeFilename;
                     const u8 = new Uint8Array(await file.arrayBuffer());
                     let binary = '';
                     for (let i = 0; i < u8.length; i += 32768) {
@@ -1547,6 +1550,10 @@ async function handleApi(request, env, url, ctx) {
             // 1. 接收 query_password
             const { variant_id, quantity, contact, payment_method, card_id, query_password } = await request.json();
             if (quantity <= 0 || !Number.isInteger(quantity)) return errRes('购买数量必须是大于0的整数', 400);
+            const contactRegex = /^[a-zA-Z0-9@._\-\u4e00-\u9fa5]+$/;
+            if (!contact || !contactRegex.test(contact)) {
+                return errRes('联系方式格式不合法，仅允许输入邮箱、手机号、QQ、微信号或中文，严禁包含特殊符号', 400);
+            }
             // --- 新增限制逻辑 START ---
             // 检查该联系人下的未支付订单数量
             const unpaidCount = (await db.prepare("SELECT COUNT(*) as c FROM orders WHERE contact=? AND status=0").bind(contact).first()).c;
@@ -1633,6 +1640,10 @@ async function handleApi(request, env, url, ctx) {
             
             if (!items || items.length === 0) return errRes('购物车为空');
             if (items.length > 30) return errRes('购物车商品种类过多，请分批下单', 400);
+            const contactRegex = /^[a-zA-Z0-9@._\-\u4e00-\u9fa5]+$/;
+            if (!contact || !contactRegex.test(contact)) {
+                return errRes('联系方式格式不合法，仅允许输入邮箱、手机号、QQ、微信号或中文，严禁包含特殊符号', 400);
+            }
             if (!query_password || query_password.length < 1) {
                 return errRes('请设置1位以上的查单密码');
             }
@@ -1948,7 +1959,12 @@ async function handleApi(request, env, url, ctx) {
                                     }
                                 } else {
                                     // 手动发货
-                                    stmts.push(db.prepare("UPDATE variants SET stock = stock - ?, sales_count = sales_count + ? WHERE id=?").bind(item.quantity, item.quantity, item.variantId));
+                                    const cartUpdateRes = await db.prepare("UPDATE variants SET stock = stock - ?, sales_count = sales_count + ? WHERE id=? AND stock >= ?").bind(item.quantity, item.quantity, item.variantId, item.quantity).run();
+                                    if(cartUpdateRes.meta.changes === 0) {
+                                        contentBody += `\n• ${item.productName} - ${item.variantName} (并发售罄，需手动处理) × ${item.quantity}`;
+                                        newOrderStatus = 1;
+                                        continue;
+                                    }
                                     const finalStock = Math.max(0, (variant.stock || 0) - item.quantity);
                                     contentBody += `\n• ${item.productName} - ${item.variantName} (手动发货) × ${item.quantity} (库存：${finalStock})`;
                                     newOrderStatus = 1; 
@@ -1995,7 +2011,10 @@ async function handleApi(request, env, url, ctx) {
                                 }
                             } else {
                                 // 手动发货
-                                stmts.push(db.prepare("UPDATE variants SET stock = stock - ?, sales_count = sales_count + ? WHERE id=?").bind(order.quantity, order.quantity, order.variant_id));
+                                const stockUpdateRes = await db.prepare("UPDATE variants SET stock = stock - ?, sales_count = sales_count + ? WHERE id=? AND stock >= ?").bind(order.quantity, order.quantity, order.variant_id, order.quantity).run();
+                                if(stockUpdateRes.meta.changes === 0) {
+                                    throw new Error("手动发货库存不足，并发扣除失败");
+                                }
                                 modeLine = '类型：手动发货';
                                 newOrderStatus = 1; // 标记状态为待发货
                             }
