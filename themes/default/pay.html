@@ -273,14 +273,10 @@
                     }
 
                     if (data.status === 1) {
-                        retryCount++;
-                        if (retryCount <= MAX_RETRIES) {
-                            const tipEl = document.getElementById('pay-status-tip');
-                            if(tipEl) tipEl.innerHTML = `<span class="text-success fw-bold"><i class="fas fa-check-circle"></i> 支付成功！正在提取卡密 (${retryCount})...</span>`;
-                            return; 
-                        }
+                        // 既然状态是 1 (待发货)，说明是手动发货订单，直接停止转圈并显示结果
                         clearInterval(pollTimer);
-                        handlePaySuccess({ status: 1, cards: [] }); 
+                        handlePaySuccess({ status: 1, cards: data.cards || [] });
+                        return;
                     }
                 } catch(e) { console.error('Check status failed', e); }
             }, 3000); 
