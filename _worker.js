@@ -2154,7 +2154,6 @@ ${cardContentForCustomer}
                         }
                     }
 
-
                     // 异步发送
                     if (notifications.length > 0 && ctx && ctx.waitUntil) {
                         ctx.waitUntil(Promise.all(notifications));
@@ -2165,12 +2164,10 @@ ${cardContentForCustomer}
             }
             return new Response('success');
         }
-
     } catch (e) {
         console.error('API Error:', e);
-        return errRes('API Error: ' + e.message, 500);
+        return errRes('服务器内部处理异常，请稍后再试或联系系统管理员', 500);
     }
-
     return errRes('API Not Found', 404);
 }
 
