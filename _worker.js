@@ -115,6 +115,17 @@ export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
         const path = url.pathname;
+        if (path === '/favicon.ico') {
+            try {
+                const db = env.xyfk;
+                const faviconConf = await db.prepare("SELECT value FROM site_config WHERE key='site_favicon'").first();
+                if (faviconConf && faviconConf.value) {
+                     const targetUrl = faviconConf.value.startsWith('http') ? faviconConf.value : url.origin + faviconConf.value;
+                     return Response.redirect(targetUrl, 302);
+                }
+            } catch(e) {}
+            return Response.redirect(url.origin + '/assets/xyrjico.webp', 302);
+        }
 
         // === 1. API 路由处理 ===
         if (path.startsWith('/api/')) {
