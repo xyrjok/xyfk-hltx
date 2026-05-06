@@ -658,6 +658,23 @@ async function handleApi(request, env, url, ctx) {
                 await db.prepare(`DELETE FROM site_config WHERE key IN (${placeholders})`).bind(...qrKeys).run();
                 return jsonRes({ success: true, deletedCount: ids.length });
             }
+            // *** 新增/修改: 保存订单 (包含编辑卡密发货) ***
+            if (path === '/api/admin/order/save' && method === 'POST') {
+                const { id, status, contact, cards_sent } = await request.json();
+                if (!id) return errRes('未提供订单ID');
+                
+                let cardsJson = null;
+                if (cards_sent) {
+                    // 按行分割并转为 JSON 数组，过滤空行
+                    cardsJson = JSON.stringify(cards_sent.split('\n').filter(s => s.trim() !== ''));
+                } else {
+                    cardsJson = '[]';
+                }
+
+                await db.prepare("UPDATE orders SET status=?, contact=?, cards_sent=? WHERE id=?")
+                    .bind(status, contact, cardsJson, id).run();
+                return jsonRes({ success: true });
+            }
 
 
             // --- 卡密管理 API (升级版: 支持分页、多字段搜索、关联查询) ---
@@ -1907,6 +1924,7 @@ async function handleApi(request, env, url, ctx) {
                                     stmts.push(db.prepare("UPDATE variants SET stock = stock - ?, sales_count = sales_count + ? WHERE id=?").bind(item.quantity, item.quantity, item.variantId));
                                     const finalStock = Math.max(0, (variant.stock || 0) - item.quantity);
                                     contentBody += `\n• ${item.productName} - ${item.variantName} (手动发货) × ${item.quantity} (库存：${finalStock})`;
+                                    newOrderStatus = 1; 
                                 }
                             }
                             if (newOrderStatus !== 1 && allCardsContent.length === 0) {
@@ -1952,6 +1970,7 @@ async function handleApi(request, env, url, ctx) {
                                 // 手动发货
                                 stmts.push(db.prepare("UPDATE variants SET stock = stock - ?, sales_count = sales_count + ? WHERE id=?").bind(order.quantity, order.quantity, order.variant_id));
                                 modeLine = '类型：手动发货';
+                                newOrderStatus = 1; // 标记状态为待发货
                             }
 
                             // Admin 通知内容
