@@ -762,7 +762,10 @@ async function handleApi(request, env, url, ctx) {
                 const cards = content.split('\n').filter(c => c.trim()).map(c => c.trim());
                 if (cards.length > 0) {
                     const stmt = db.prepare("INSERT INTO cards (variant_id, content, status, created_at) VALUES (?, ?, 0, ?)");
-                    await db.batch(cards.map(c => stmt.bind(variant_id, c, time())));
+                    const stmts = cards.map(c => stmt.bind(variant_id, c, time()));
+                    for (let i = 0; i < stmts.length; i += 100) {
+                        await db.batch(stmts.slice(i, i + 100));
+                    }
                     // 更新库存
                     await db.prepare("UPDATE variants SET stock = (SELECT COUNT(*) FROM cards WHERE variant_id=? AND status=0) WHERE id = ?")
                         .bind(variant_id, variant_id).run();
@@ -1101,8 +1104,9 @@ async function handleApi(request, env, url, ctx) {
                     // 直接加入队列，无需在 JS 层判断是否存在
                     batch.push(stmt.bind(url, joinedName, now));
                 }
-
-                if (batch.length > 0) await db.batch(batch);
+                for (let i = 0; i < batch.length; i += 100) {
+                    await db.batch(batch.slice(i, i + 100));
+                }
                 return jsonRes({ success: true, count: batch.length });
             }
 
@@ -1628,7 +1632,7 @@ async function handleApi(request, env, url, ctx) {
             const { items, contact, query_password, payment_method } = await request.json();
             
             if (!items || items.length === 0) return errRes('购物车为空');
-            // [修改] 验证查单密码 (1位)
+            if (items.length > 30) return errRes('购物车商品种类过多，请分批下单', 400);
             if (!query_password || query_password.length < 1) {
                 return errRes('请设置1位以上的查单密码');
             }
@@ -1852,9 +1856,11 @@ async function handleApi(request, env, url, ctx) {
                     console.error('Alipay Notify: Amount or AppId mismatch');
                     return new Response('fail');
                 }
-                // 【修复点1】删除 BEGIN TRANSACTION，直接执行更新
-                await db.prepare("UPDATE orders SET status=1, paid_at=?, trade_no=? WHERE id=? AND status=0")
+                const updateRes = await db.prepare("UPDATE orders SET status=1, paid_at=?, trade_no=? WHERE id=? AND status=0")
                         .bind(time(), trade_no, out_trade_no).run();
+                if (!updateRes.success || updateRes.meta.changes !== 1) {
+                    return new Response('success'); 
+                }
                 try {
                     await db.prepare("DELETE FROM site_config WHERE key=?").bind('qr_' + out_trade_no).run();
                 } catch(e) { console.error('Clear QR cache error:', e); }
