@@ -258,31 +258,16 @@
                     const res = await fetch(`/api/shop/order/status?order_id=${currentOrderId}`);
                     const data = await res.json();
                     
-                    // 情况1：订单状态 >= 2 (已发货/已完成) -> 肯定有卡密，直接显示
                     if (data.status >= 2) {
                         clearInterval(pollTimer);
                         handlePaySuccess(data);
                         return;
                     }
 
-                    // 情况2：订单状态 == 1 (已支付/待发货)
                     if (data.status === 1) {
-                        // 订单状态为 1 时，cards_sent 存的是购物车列表，不能作为发货成功的判断依据。
-                        // 必须等待状态变为 2 (已完成) 才停止轮询。
-
-                        // 如果已支付但没有完成，我们多等一会儿
-                        retryCount++;
-                        if (retryCount <= MAX_RETRIES) {
-                            // 更新提示文字，安抚用户
-                            const tipEl = document.getElementById('pay-status-tip');
-                            if(tipEl) tipEl.innerHTML = `<span class="text-success"><i class="fas fa-sync fa-spin"></i> 支付成功！正在提取卡密 (${retryCount}/${MAX_RETRIES})...</span>`;
-                            return; // 继续轮询
-                        }
-
-                        // 如果等了很久（超过15秒）还是 status=1，说明发货失败或人工发货，显示默认提示
                         clearInterval(pollTimer);
-                        // 强制传入空卡密数组，确保 handlePaySuccess 显示“等待发货”提示
-                        handlePaySuccess({ status: 1, cards: [] }); 
+                        handlePaySuccess({ status: 1, cards: data.cards || [] });
+                        return;
                     }
                 } catch(e) { console.error('Check status failed', e); }
             }, 3000); 
@@ -346,8 +331,8 @@
             } else {
                 cardsHtml = `
                     <div class="alert alert-warning mt-4">
-                        <h6 class="alert-heading fw-bold">等待发货</h6>
-                        <p class="mb-0">支付已确认！该商品可能需要人工发货，请稍后在订单页面查看。</p>
+                        <h6 class="alert-heading fw-bold text-danger">等待发货</h6>
+                        <p class="mb-0 fw-bold" style="color: red;">该商品规格为手动发货，请联系商家发手动发货。</p>
                     </div>
                     <div class="text-center mt-3">
                         <a href="/orders" class="btn btn-primary rounded-pill px-4">前往订单页</a>
