@@ -289,8 +289,10 @@ export default {
         // ====== [新增] GitHub 图片代理 (支持私有仓库) ======
         if (path.startsWith('/gh_image/')) {
             const filename = path.replace('/gh_image/', '');
-            // 【安全修复】白名单校验：只允许图片格式，防止读取源码或敏感文件
             if (!/\.(jpg|jpeg|png|gif|webp|ico|svg)$/i.test(filename)) {
+                return new Response('Forbidden', { status: 403 });
+            }
+            if (filename.includes('..') || filename.includes('?')) {
                 return new Response('Forbidden', { status: 403 });
             }
             let conf = {};
@@ -301,7 +303,6 @@ export default {
 
             if (!conf.gh_user || !conf.gh_repo) return new Response('Config missing', { status: 404 });
 
-            // 构造 GitHub Raw URL (私有仓库需 Token)
             const rawUrl = `https://raw.githubusercontent.com/${conf.gh_user}/${conf.gh_repo}/main/${filename}`;
             const headers = { 'User-Agent': 'Cloudflare-Worker' };
             if (conf.gh_token) headers['Authorization'] = `token ${conf.gh_token}`;
@@ -320,7 +321,9 @@ export default {
         if (path.startsWith('/tg_image/')) {
             const filePath = path.replace('/tg_image/', '');
             if (!/\.(jpg|jpeg|png|gif|webp)$/i.test(filePath)) return new Response('Forbidden', { status: 403 });
-            
+            if (filePath.includes('..') || filePath.includes('?')) {
+                return new Response('Forbidden', { status: 403 });
+            }
             let token = '';
             try {
                 const db = env.xyfk;
@@ -1634,7 +1637,8 @@ async function handleApi(request, env, url, ctx) {
                 // 假设前端传来的 ID 正确，查库验证
                 // 注意：前端 cart-page.js 已修复为传 variantId
                 const variant = await db.prepare("SELECT * FROM variants WHERE id=?").bind(item.variantId).first();
-                if (!variant) throw new Error(`商品 ${item.variantName} 规格不存在`);
+                if (!variant) throw new Error('商品规格不存在');
+                const product = await db.prepare("SELECT name FROM products WHERE id=?").bind(variant.product_id).first();
 
                 let stock = 0;
                 let finalPrice = variant.price; // 从数据库重新计算
@@ -1681,8 +1685,8 @@ async function handleApi(request, env, url, ctx) {
                 // 存储验证后的信息
                 validatedItems.push({
                     variantId: variant.id,
-                    productName: item.productName,
-                    variantName: item.variantName,
+                    productName: product ? product.name : '未知商品',
+                    variantName: variant.name,
                     quantity: item.quantity,
                     price: finalPrice, // 使用后端计算的单价
                     buyMode: item.buyMode,
@@ -1830,7 +1834,13 @@ async function handleApi(request, env, url, ctx) {
             if (params.trade_status === 'TRADE_SUCCESS') {
                 const out_trade_no = params.out_trade_no;
                 const trade_no = params.trade_no;
-                
+                // 【安全修复】新增支付金额与应用ID的严格校验防篡改
+                const checkOrder = await db.prepare("SELECT * FROM orders WHERE id=? AND status=0").bind(out_trade_no).first();
+                if (!checkOrder) return new Response('fail');
+                if (parseFloat(params.total_amount) !== parseFloat(checkOrder.total_amount) || params.app_id !== config.app_id) {
+                    console.error('Alipay Notify: Amount or AppId mismatch');
+                    return new Response('fail');
+                }
                 // 【修复点1】删除 BEGIN TRANSACTION，直接执行更新
                 await db.prepare("UPDATE orders SET status=1, paid_at=?, trade_no=? WHERE id=? AND status=0")
                         .bind(time(), trade_no, out_trade_no).run();
