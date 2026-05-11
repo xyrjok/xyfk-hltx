@@ -262,6 +262,16 @@
                             </a>
                         </div>
                     `;
+                } else if (order.status === 1) {
+                    statusBadge = '<span class="badge bg-warning text-dark">待人工处理</span>';
+                    let cards = [];
+                    try { cards = JSON.parse(order.cards_sent || '[]'); } catch(e) {}
+                    
+                    if (cards.length > 0) {
+                        contentBody = renderCardsHtml(cards) + '<div class="alert alert-warning small mt-2 mb-0 py-2 fw-bold text-danger text-center"><i class="fas fa-exclamation-triangle"></i> 订单中包含手动发货商品，请联系客服发货。</div>';
+                    } else {
+                        contentBody = '<div class="alert alert-warning small mb-0 py-3 fw-bold text-danger text-center">该商品规格为手动发货，请联系商家发手动发货。</div>';
+                    }
                 } else {
                     statusBadge = '<span class="badge bg-success">交易成功</span>';
                     let cards = [];
@@ -270,8 +280,12 @@
                     if (cards.length > 0) {
                         contentBody = renderCardsHtml(cards);
                     } else {
-                        contentBody = '<div class="alert alert-warning small mb-0 py-2">配货中或数据异常，请联系客服</div>';
+                        contentBody = '<div class="text-muted small py-2">无卡密内容</div>';
                     }
+                }
+                
+                if (order.status !== 0) {
+                     contentBody += '</div>';
                 }
 
                 html += `
@@ -353,7 +367,7 @@
                 .then(res => res.json())
                 .then(data => {
                     if (data.status >= 1) {
-                        renderSuccessSingle(orderId, data.cards);
+                        renderSuccessSingle(orderId, data.cards, data.status); 
                     } else {
                         showError('订单未支付、不存在或未发货。<br>如需管理未支付订单，请使用“联系方式查询”。');
                     }
@@ -365,7 +379,7 @@
                 });
         }
 
-        function renderSuccessSingle(orderId, cards) {
+        function renderSuccessSingle(orderId, cards, status) { 
             let html = `
                 <div class="alert alert-success text-center py-2 mb-3">
                     <i class="fa fa-check-circle"></i> 您的订单已发货
@@ -377,6 +391,7 @@
                     </div>
                     <div class="order-body">
                         ${renderCardsHtml(cards)}
+                        ${status === 1 ? (cards && cards.length > 0 ? '<div class="alert alert-warning small mt-3 mb-0 py-2 fw-bold text-danger text-center">注意：包含手动发货商品，请联系客服发货。</div>' : '<div class="alert alert-warning small mt-3 mb-0 py-2 fw-bold text-danger text-center">该商品为手动发货，请联系商家发货。</div>') : ''}
                     </div>
                 </div>
             `;
