@@ -603,6 +603,7 @@ window.updateCartBadge = function() {
                 if (res.mobile_sidebar_logo_link) {
                     $('#mobile-sidebar-logo-link').attr('href', res.mobile_sidebar_logo_link);
                 }
+                if(typeof window.renderHeader === 'function') { window.renderHeader(res.site_name, res.site_logo, res.show_site_name); }
             });
         });
         // 3. 重写暴露给外部的 renderHeader 函数：使其仅负责后台配置返回后填充文字和图片
