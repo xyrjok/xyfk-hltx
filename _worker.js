@@ -1798,7 +1798,7 @@ async function handleApi(request, env, url, ctx) {
                      biz_content: JSON.stringify({
                          out_trade_no: order.id,
                          total_amount: order.total_amount,
-                         subject: `hltx订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
+                         subject: `HLTX订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
                      })
                  };
                  params.sign = await signAlipay(params, config.private_key);
@@ -1950,7 +1950,7 @@ async function handleApi(request, env, url, ctx) {
                                         }
                                         // 库存显示
                                         const currentCardCount = (await db.prepare("SELECT COUNT(*) as c FROM cards WHERE variant_id=? AND status=0").bind(item.variantId).first()).c;
-                                        const finalStock = Math.max(0, currentCardCount - item.quantity);
+                                        const finalStock = currentCardCount;
                                         contentBody += `\n• ${item.productName} - ${item.variantName}${itemNote} × ${item.quantity} (库存：${finalStock})`;
                                     } else {
                                         // 缺货，不发货，但订单状态保持已支付 (status=1)
@@ -2021,9 +2021,8 @@ async function handleApi(request, env, url, ctx) {
 
                             // Admin 通知内容
                             const currentCardCount = (await db.prepare("SELECT COUNT(*) as c FROM cards WHERE variant_id=? AND status=0").bind(order.variant_id).first()).c;
-                            const stockValue = singleVariant.auto_delivery === 1 ? currentCardCount : singleVariant.stock;
-                            // 如果成功发货，则从库存中减去购买数量
-                            const finalStock = Math.max(0, stockValue - (newOrderStatus === 2 || singleVariant.auto_delivery === 0 ? order.quantity : 0));
+                            // 自动发货查出的已是最终库存，手动发货则需减去当前购买量
+                            const finalStock = singleVariant.auto_delivery === 1 ? currentCardCount : Math.max(0, singleVariant.stock - order.quantity);
                             
                             contentBody = `商品：${order.product_name}\n规格：${order.variant_name}\n${modeLine}\n数量：${order.quantity} (库存：${finalStock})`;
                         }
@@ -2036,10 +2035,13 @@ async function handleApi(request, env, url, ctx) {
 
                     // --- 4. 数据库最终更新 (订单状态和卡密内容) ---
                     if (newOrderStatus === 2) {
-                        // 仅在成功发货或手动发货（不需要卡密）的情况下更新状态到 2
+                        // 完全成功（全自动发货或纯手动发货），更新状态为已完成 2
                         stmts.push(db.prepare("UPDATE orders SET status=2, cards_sent=? WHERE id=?").bind(JSON.stringify(allCardsContent), out_trade_no));
-                    } 
-                    // else: 如果是缺货(status=1)，则不更新 cards_sent，保持 status=1
+                    } else if (newOrderStatus === 1 && allCardsContent.length > 0) {
+                        // 修复BUG：如果是混合购物车（导致状态保持为1），但系统已经提取了自动部分的卡密，必须将卡密强制保存入库防丢失！
+                        stmts.push(db.prepare("UPDATE orders SET cards_sent=? WHERE id=?").bind(JSON.stringify(allCardsContent), out_trade_no));
+                    }
+                    // 如果纯缺货无任何卡密产出，则什么都不做，保持 status=1
 
                     if (stmts.length > 0) {
                         // 批量执行发货和销售计数更新
@@ -2093,7 +2095,7 @@ ${contentBody}
                     // B. [新增] 客户发货通知
                     const customerEmail = isEmail(order.contact) ? order.contact : null;
                     
-                    if (newOrderStatus === 2 && customerEmail) {
+                    if (customerEmail) { 
                         let isManualOrder = false;
                         if (!isCartOrder) {
                              isManualOrder = singleVariant?.auto_delivery === 0;
@@ -2101,8 +2103,8 @@ ${contentBody}
                         
                         const hasDeliveredCards = allCardsContent.length > 0;
                         
-                        // 只有在成功发货（status=2）时，才发送邮件
-                        if (isManualOrder || hasDeliveredCards || (isCartOrder && newOrderStatus === 2)) {
+                        // 修复：取消 status=2 的硬性限制，确保纯手动发货和混合购物车都能发邮件
+                        if (isManualOrder || hasDeliveredCards || isCartOrder) {
                             
                             // --- 构建客户邮件内容 ---
                             let cardContentForCustomer = '';
