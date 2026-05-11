@@ -1963,6 +1963,7 @@ async function handleApi(request, env, url, ctx) {
                                     const cartUpdateRes = await db.prepare("UPDATE variants SET stock = stock - ?, sales_count = sales_count + ? WHERE id=? AND stock >= ?").bind(item.quantity, item.quantity, item.variantId, item.quantity).run();
                                     if(cartUpdateRes.meta.changes === 0) {
                                         contentBody += `\n• ${item.productName} - ${item.variantName} (并发售罄，需手动处理) × ${item.quantity}`;
+                                        allCardsContent.push(`【${item.productName} - ${item.variantName}】\n该商品为手动发货，系统已接单，请联系客服为您处理。`);
                                         newOrderStatus = 1;
                                         continue;
                                     }
