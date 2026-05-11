@@ -779,13 +779,20 @@ CardABCDEF #[推荐号码]"></textarea>
 
         try {
             const ids = Array.from(checkboxes).map(cb => parseInt(cb.value));
-            // 并发删除，实际生产环境建议后端增加批量删除接口
-            await Promise.all(ids.map(id => api('card/delete', { method: 'POST', body: JSON.stringify({ id }) })));
-            alert('批量删除完成'); loadCards();
-        } catch (e) { alert('部分删除失败'); loadCards(); } finally { btn.disabled = false; }
+        // 并发删除，实际生产环境建议后端增加批量删除接口
+        await Promise.all(ids.map(id => api('card/delete', { method: 'POST', body: JSON.stringify({ id }) })));
+        alert('批量删除完成'); 
+    } catch (e) { 
+        alert('部分删除失败'); 
+    } finally { 
+        btn.disabled = false; 
+        // 【新增】在刷新列表前，先恢复按钮的 HTML 结构，防止 updateBatchBtn() 找不到元素崩溃
+        btn.innerHTML = '<i class="fas fa-trash"></i> 删除 (<span id="selected-count">0</span>)';
+        loadCards(); 
     }
+}
 
-    initData();
+initData();
 
     // Mobile menu handlers
     const mobileBtn = document.getElementById('mobile-menu-toggle');
