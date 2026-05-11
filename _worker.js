@@ -622,7 +622,7 @@ async function handleApi(request, env, url, ctx) {
                 await db.prepare(`
                 UPDATE variants 
                 SET stock = (SELECT COUNT(*) FROM cards WHERE variant_id = variants.id AND status = 0) 
-                WHERE product_id = ? AND auto_delivery = 1
+                WHERE product_id = ? AND (auto_delivery = 1 OR (SELECT COUNT(*) FROM cards WHERE variant_id = variants.id AND status = 0) > 0)
                 `).bind(productId).run();
                 
                 return jsonRes({ success: true, productId: productId });
@@ -1798,7 +1798,7 @@ async function handleApi(request, env, url, ctx) {
                      biz_content: JSON.stringify({
                          out_trade_no: order.id,
                          total_amount: order.total_amount,
-                         subject: `HLTX订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
+                         subject: `JM166订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
                      })
                  };
                  params.sign = await signAlipay(params, config.private_key);
