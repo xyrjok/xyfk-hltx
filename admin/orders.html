@@ -489,8 +489,15 @@
         btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 删除中...';
         try {
             await Promise.all(ids.map(id => api('order/delete', { method: 'POST', body: JSON.stringify({ id }) })));
-            alert('批量删除完成'); loadOrders(currentPage);
-        } catch (error) { alert('部分删除失败'); loadOrders(currentPage); } finally { btn.disabled = false; }
+            alert('批量删除完成'); 
+        } catch (error) { 
+            alert('部分删除失败'); 
+        } finally { 
+            btn.disabled = false; 
+            // 【新增】恢复按钮结构防崩溃
+            btn.innerHTML = '<i class="fas fa-trash"></i> 删除 (<span id="selected-count">0</span>)';
+            loadOrders(currentPage); 
+        }
     }
     
     // 单个删除
