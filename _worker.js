@@ -583,7 +583,7 @@ async function handleApi(request, env, url, ctx) {
 
                 for (const v of data.variants) {
                     const wholesale_config_json = v.wholesale_config ? JSON.stringify(v.wholesale_config) : null;
-                    const auto_delivery = v.auto_delivery !== undefined ? v.auto_delivery : 1;
+                    const auto_delivery = v.auto_delivery !== undefined ? Number(v.auto_delivery) : 1;
                     const stock = v.stock !== undefined ? v.stock : 0;
                     const variantId = v.id ? parseInt(v.id) : null;
 
