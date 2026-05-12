@@ -1798,7 +1798,7 @@ async function handleApi(request, env, url, ctx) {
                      biz_content: JSON.stringify({
                          out_trade_no: order.id,
                          total_amount: order.total_amount,
-                         subject: `HLTX订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
+                         subject: `JM166订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
                      })
                  };
                  params.sign = await signAlipay(params, config.private_key);
@@ -1969,6 +1969,7 @@ async function handleApi(request, env, url, ctx) {
                                     }
                                     const finalStock = Math.max(0, (variant.stock || 0) - item.quantity);
                                     contentBody += `\n• ${item.productName} - ${item.variantName} (手动发货) × ${item.quantity} (库存：${finalStock})`;
+                                    allCardsContent.push(`【${item.productName} - ${item.variantName}】\n该商品为手动发货，已通知客服为您排单处理。`);
                                     newOrderStatus = 1; 
                                 }
                             }
@@ -2018,6 +2019,10 @@ async function handleApi(request, env, url, ctx) {
                                     throw new Error("手动发货库存不足，并发扣除失败");
                                 }
                                 modeLine = '类型：手动发货';
+                                
+                                // 【新增】把手动发货的提示作为“虚拟卡密”塞进去
+                                allCardsContent.push(`【${order.product_name} - ${order.variant_name}】\n该商品为手动发货，已通知客服为您排单处理。`);
+                                
                                 newOrderStatus = 1; // 标记状态为待发货
                             }
 
@@ -2039,7 +2044,7 @@ async function handleApi(request, env, url, ctx) {
                     if (newOrderStatus === 2) {
                         // 完全成功（全自动发货或纯手动发货），更新状态为已完成 2
                         stmts.push(db.prepare("UPDATE orders SET status=2, cards_sent=? WHERE id=?").bind(JSON.stringify(allCardsContent), out_trade_no));
-                    } else if (newOrderStatus === 1 && allCardsContent.length > 0) {
+                    } else if (newOrderStatus === 1) {
                         // 修复BUG：如果是混合购物车（导致状态保持为1），但系统已经提取了自动部分的卡密，必须将卡密强制保存入库防丢失！
                         stmts.push(db.prepare("UPDATE orders SET cards_sent=? WHERE id=?").bind(JSON.stringify(allCardsContent), out_trade_no));
                     }
