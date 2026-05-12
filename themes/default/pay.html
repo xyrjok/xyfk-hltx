@@ -273,7 +273,10 @@
                     }
 
                     if (data.status === 1) {
-                        // 既然状态是 1 (待发货)，说明是手动发货订单，直接停止转圈并显示结果
+                        if (data.cards && data.cards.length > 0 && typeof data.cards[0] === 'object' && retryCount < MAX_RETRIES) {
+                            retryCount++;
+                            return; 
+                        }
                         clearInterval(pollTimer);
                         handlePaySuccess({ status: 1, cards: data.cards || [] });
                         return;
@@ -313,7 +316,7 @@
                 }
             }
 
-            cardsArray = cardsArray.filter(c => c && c.trim() !== "");
+            cardsArray = cardsArray.filter(c => c && typeof c === 'string' && c.trim() !== "");
 
             if (cardsArray.length > 0) {
                 const cardItems = cardsArray.map(card => 
