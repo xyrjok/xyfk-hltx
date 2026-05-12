@@ -273,10 +273,25 @@
                     }
 
                     if (data.status === 1) {
-                        if (data.cards && data.cards.length > 0 && typeof data.cards[0] === 'object' && retryCount < MAX_RETRIES) {
+                        // 【兼容模式判断】：检查是否已经拿到了有效的卡密数据
+                        let hasValidCards = false;
+                        
+                        if (data.cards && Array.isArray(data.cards) && data.cards.length > 0) {
+                            const firstCard = data.cards[0];
+                            if (typeof firstCard === 'object' && firstCard !== null) {
+                                hasValidCards = true;
+                            } 
+                            else if (typeof firstCard === 'string' && firstCard.trim() !== '') {
+                                hasValidCards = true;
+                            }
+                        }
+
+                        // 如果还没拿到有效卡密，且未超过最大重试次数，就继续等待
+                        if (!hasValidCards && retryCount < MAX_RETRIES) {
                             retryCount++;
                             return; 
                         }
+
                         clearInterval(pollTimer);
                         handlePaySuccess({ status: 1, cards: data.cards || [] });
                         return;
@@ -316,10 +331,22 @@
                 }
             }
 
-            cardsArray = cardsArray.filter(c => c && typeof c === 'string' && c.trim() !== "");
+            // 【核心修复】：智能提取卡密：遇到单件字符串直接拿，遇到购物车多件对象就带上商品名
+            let processedCards = [];
+            cardsArray.forEach(item => {
+                if (typeof item === 'string' && item.trim() !== "") {
+                    processedCards.push(item);
+                } else if (typeof item === 'object' && item !== null) {
+                    if (Array.isArray(item.cards) && item.cards.length > 0) {
+                        item.cards.forEach(c => {
+                            processedCards.push(`[${item.productName || item.variantName}] ${c}`);
+                        });
+                    }
+                }
+            });
 
-            if (cardsArray.length > 0) {
-                const cardItems = cardsArray.map(card => 
+            if (processedCards.length > 0) {
+                const cardItems = processedCards.map(card => 
                     `<div class="p-2 mb-2 bg-white border rounded text-break user-select-all" style="font-family: monospace; font-size: 14px; color: #333;">${card}</div>`
                 ).join('');
 
@@ -346,7 +373,7 @@
                 cardsHtml = `
                     <div class="alert alert-warning mt-4">
                         <h6 class="alert-heading fw-bold text-danger">等待发货</h6>
-                        <p class="mb-0 fw-bold" style="color: red;">该商品规格为手动发货，请联系商家发手动发货。</p>
+                        <p class="mb-0 fw-bold" style="color: red;">该订单包含手动发货商品，请联系商家发货。</p>
                     </div>
                     <div class="text-center mt-3">
                         <a href="/orders" class="btn btn-primary rounded-pill px-4">前往订单页</a>
