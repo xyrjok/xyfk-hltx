@@ -265,6 +265,10 @@
                     }
 
                     if (data.status === 1) {
+                        if (data.cards && data.cards.length > 0 && typeof data.cards[0] === 'object' && retryCount < MAX_RETRIES) {
+                            retryCount++;
+                            return; 
+                        }
                         clearInterval(pollTimer);
                         handlePaySuccess({ status: 1, cards: data.cards || [] });
                         return;
@@ -302,8 +306,8 @@
                 }
             }
 
-            // 过滤空内容
-            cardsArray = cardsArray.filter(c => c && c.trim() !== "");
+            // 过滤空内容并确保类型安全，防止未处理完时触发对象报错
+            cardsArray = cardsArray.filter(c => c && typeof c === 'string' && c.trim() !== "");
 
             if (cardsArray.length > 0) {
                 const cardItems = cardsArray.map(card => 
