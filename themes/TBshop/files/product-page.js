@@ -214,7 +214,7 @@ function renderProductDetail(p) {
                         </div>
 
                         <div class="mb-4 d-flex align-items-center flex-wrap">
-                            <span class="text-secondary small me-3 text-nowrap">支付方式：</span>
+                            <span class="text-secondary small me-3 mb-2 text-nowrap">支付方式：</span>
                             <div class="d-flex align-items-center flex-wrap" id="payment-method-list">
                                 <span class="spinner-border spinner-border-sm text-secondary"></span>
                             </div>
@@ -1067,9 +1067,9 @@ async function loadPaymentGateways() {
             
             // 优先使用后台自定义图标，如果未填写则按默认格式显示
             if (g.icon) {
-                iconHtml = `<img src="${g.icon}" style="width:20px; height:20px; object-fit:contain;"> <span style="font-size:13px; font-weight:bold; margin-left:4px;">${g.name}</span>`;
+                iconHtml = `<img src="${g.icon}" style="width:20px; height:20px; object-fit:contain;"> <span style="font-size:13px; font-weight:900; margin-left:4px;">${g.name}</span>`;
             } else {
-                iconHtml = `<i class="fas fa-credit-card" style="color:#1678ff;"></i> <span style="font-size:13px; font-weight:bold; margin-left:4px;">${g.name}</span>`;
+                iconHtml = `<i class="fas fa-credit-card" style="color:#1678ff;"></i> <span style="font-size:13px; font-weight:900; margin-left:4px;">${g.name}</span>`;
             }
             
             html += `<div class="payment-option ${activeClass}" onclick="selectPayment('${g.id}', this)" title="${g.name}">
