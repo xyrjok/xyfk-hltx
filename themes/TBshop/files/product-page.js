@@ -8,7 +8,7 @@ let currentProduct = null;   // 当前商品数据
 let currentVariant = null;   // 当前选中的 SKU
 let quantity = 1;            // 购买数量
 let buyMethod = null;        // 购买方式: null | 'random' | 'select'
-let paymentMethod = 'alipay_f2f'; // 默认支付方式
+let paymentMethod = '';
 
 // 自选号码相关全局变量
 let selectedSpecificCardId = null;   // 选中的具体卡密ID
@@ -1060,15 +1060,19 @@ async function loadPaymentGateways() {
         if (!list || list.length === 0) { container.innerHTML = '<small class="text-muted">暂无支付方式</small>'; return; }
         
         let html = '';
-        paymentMethod = list[0].type; // 默认选中第一个
+        paymentMethod = list[0].id; // 默认选中第一个的 ID
         list.forEach((g, index) => {
             const activeClass = index === 0 ? 'active' : '';
             let iconHtml = '<i class="fas fa-credit-card"></i>';
-            if (g.type.includes('alipay')) iconHtml = '<i class="fab fa-alipay" style="color:#1678ff;"></i>';
-            else if (g.type.includes('wxpay')) iconHtml = '<i class="fab fa-weixin" style="color:#09bb07;"></i>';
-            else if (g.type.includes('usdt')) iconHtml = '<span style="font-size:12px; font-weight:bold; color:#26a17b;">USDT</span>';
             
-            html += `<div class="payment-option ${activeClass}" onclick="selectPayment('${g.type}', this)" title="${g.name}">
+            // 优先使用后台自定义图标，如果未填写则按默认格式显示
+            if (g.icon) {
+                iconHtml = `<img src="${g.icon}" style="width:20px; height:20px; object-fit:contain;"> <span style="font-size:13px; font-weight:bold; margin-left:4px;">${g.name}</span>`;
+            } else {
+                iconHtml = `<i class="fas fa-credit-card" style="color:#1678ff;"></i> <span style="font-size:13px; font-weight:bold; margin-left:4px;">${g.name}</span>`;
+            }
+            
+            html += `<div class="payment-option ${activeClass}" onclick="selectPayment('${g.id}', this)" title="${g.name}">
                         ${iconHtml}<div class="payment-check-mark"><i class="fa fa-check"></i></div>
                      </div>`;
         });
