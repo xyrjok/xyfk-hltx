@@ -7,7 +7,7 @@ let currentProduct = null;
 let currentVariant = null;
 let quantity = 1;
 let buyMethod = null;        // 'random' | 'select' | null
-let paymentMethod = 'alipay_f2f';
+let paymentMethod = '';
 let selectedSpecificCardId = null;
 let selectedSpecificCardInfo = '';
 
@@ -898,14 +898,21 @@ function loadPaymentGateways() {
             const container = $('#payment-method-list');
             if (!list || list.length === 0) { container.html('<small class="text-muted">暂无</small>'); return; }
             let html = '';
-            paymentMethod = list[0].type;
+            // 变更点1：默认选中第一个的 ID 作为支付标志
+            paymentMethod = list[0].id;
             list.forEach((g, index) => {
                 const activeClass = index === 0 ? 'active' : '';
                 let iconHtml = '<i class="fas fa-credit-card"></i>';
-                if (g.type.includes('alipay')) iconHtml = '<i class="fab fa-alipay" style="color:#1678ff;"></i>';
-                else if (g.type.includes('wxpay')) iconHtml = '<i class="fab fa-weixin" style="color:#09bb07;"></i>';
-                else if (g.type.includes('usdt')) iconHtml = '<span style="font-size:12px; font-weight:bold; color:#26a17b;">USDT</span>';
-                html += `<div class="payment-option ${activeClass}" onclick="selectPayment('${g.type}', this)">${iconHtml}<div class="payment-check-mark"><i class="fas fa-check"></i></div></div>`;
+                
+                // 变更点2：如果后台配置了图标，则优先使用后台图标图片
+                if (g.icon) {
+                    iconHtml = `<img src="${g.icon}" style="width:20px; height:20px; object-fit:contain;"> <span style="font-size:13px; font-weight:bold; margin-left:4px;">${g.name}</span>`;
+                } else {
+                    iconHtml = `<i class="fas fa-credit-card" style="color:#1678ff;"></i> <span style="font-size:13px; font-weight:bold; margin-left:4px;">${g.name}</span>`;
+                }
+                
+                // 变更点3：将对应的网关 ID 传入选择事件
+                html += `<div class="payment-option ${activeClass}" onclick="selectPayment('${g.id}', this)" title="${g.name}">${iconHtml}<div class="payment-check-mark"><i class="fas fa-check"></i></div></div>`;
             });
             container.html(html);
         }
