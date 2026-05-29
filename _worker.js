@@ -870,9 +870,24 @@ async function handleApi(request, env, url, ctx) {
             }
             if (path === '/api/admin/gateway/save' && method === 'POST') {
                 const { id, name, type, config, active, remark } = await request.json();
-                await db.prepare("UPDATE pay_gateways SET name=?, type=?, config=?, active=?, remark=? WHERE id=?")
-                   .bind(name, type, JSON.stringify(config), active, remark, id).run();
+                const safeRemark = remark || null; // 防止 remark 为 undefined 导致数据库崩溃
+                
+                if (id) {
+                    // 如果存在 ID，则更新旧数据
+                    await db.prepare("UPDATE pay_gateways SET name=?, type=?, config=?, active=?, remark=? WHERE id=?")
+                       .bind(name, type, JSON.stringify(config), active, safeRemark, id).run();
+                } else {
+                    // 如果没有 ID，则插入新数据 (前端自动初始化 4 个 U 网络时会走到这里)
+                    await db.prepare("INSERT INTO pay_gateways (name, type, config, active, remark) VALUES (?, ?, ?, ?, ?)")
+                       .bind(name, type, JSON.stringify(config), active, safeRemark).run();
+                }
                 return jsonRes({success: true});
+            }
+            if (path === '/api/admin/gateway/delete' && method === 'POST') {
+                const { id } = await request.json();
+                if (!id) return errRes('ID不能为空');
+                await db.prepare("DELETE FROM pay_gateways WHERE id=?").bind(id).run();
+                return jsonRes({ success: true });
             }
 
             // --- 文章分类 API ---
@@ -1286,12 +1301,16 @@ async function handleApi(request, env, url, ctx) {
 
             return jsonRes(safeConfig);
         }
-        // ====== [开始] 新增代码：获取启用的支付方式 ======
+       // ====== [开始] 新增代码：获取启用的支付方式 ======
         if (path === '/api/shop/gateways') {
-            // 获取所有 active=1 的支付网关
-            const { results } = await db.prepare("SELECT name, type, config FROM pay_gateways WHERE active = 1").all();
-            // 过滤敏感信息，仅返回类型和名称
-            const gateways = results.map(g => ({ name: g.name, type: g.type }));
+            // 获取所有 active=1 的支付网关，并取出 ID
+            const { results } = await db.prepare("SELECT id, name, type, config FROM pay_gateways WHERE active = 1").all();
+            // 过滤敏感信息，仅返回前端所需的 id, name, type 和自定义 icon
+            const gateways = results.map(g => {
+                let icon = '';
+                try { icon = JSON.parse(g.config).icon || ''; } catch(e){}
+                return { id: g.id, name: g.name, type: g.type, icon: icon };
+            });
             return jsonRes(gateways);
         }
         // ====== [结束] 新增代码 ======
@@ -1775,16 +1794,21 @@ async function handleApi(request, env, url, ctx) {
              if (!order) return errRes('订单不存在');
              if (order.status >= 1) return jsonRes({ paid: true });
 
-             if (order.payment_method === 'alipay_f2f') {
+             // ===== 新增: 根据前台传来的 ID 获取对应的独立支付配置 =====
+             let gateway = await db.prepare("SELECT type, name, config FROM pay_gateways WHERE id=? AND active=1").bind(order.payment_method).first();
+             if(!gateway) {
+                 gateway = await db.prepare("SELECT type, name, config FROM pay_gateways WHERE type=? AND active=1").bind(order.payment_method).first();
+             }
+             if(!gateway) return errRes('该支付方式未配置或已停用');
+             const config = JSON.parse(gateway.config);
+
+             if (gateway.type === 'alipay_f2f') {
              // [新增代码 START] 检查是否有缓存的二维码，有则直接返回，不再请求支付宝
              const cachedQr = await db.prepare("SELECT value FROM site_config WHERE key=?").bind('qr_' + order.id).first();
              if (cachedQr && cachedQr.value) {
-                 return jsonRes({ type: 'qrcode', qr_code: cachedQr.value, order_id: order.id, amount: order.total_amount });
+                 return jsonRes({ type: 'qrcode', gateway_type: gateway.type, gateway_name: gateway.name, gateway_icon: config.icon || '', qr_code: cachedQr.value, order_id: order.id, amount: order.total_amount });
              }
              // [新增代码 END]
-                 const gateway = await db.prepare("SELECT config FROM pay_gateways WHERE type='alipay_f2f' AND active=1").first();
-                 if(!gateway) return errRes('支付方式未配置');
-                 const config = JSON.parse(gateway.config);
                  if (!config.app_id || !config.private_key || !config.alipay_public_key) {
                      return errRes('支付配置不完整');
                  }
@@ -1798,7 +1822,7 @@ async function handleApi(request, env, url, ctx) {
                      biz_content: JSON.stringify({
                          out_trade_no: order.id,
                          total_amount: order.total_amount,
-                         subject: `JM166订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
+                         subject: `HLTX订单号：${order.id}` // 合并订单会显示 “购物车合并订单” 商品名称是：subject: `${order.product_name}`
                      })
                  };
                  params.sign = await signAlipay(params, config.private_key);
@@ -1815,13 +1839,62 @@ async function handleApi(request, env, url, ctx) {
 
                      return jsonRes({
                          type: 'qrcode',
-                         qr_code: qrUrl, // 使用变量 qrUrl
+                         gateway_type: gateway.type,
+                         gateway_name: gateway.name,
+                         gateway_icon: config.icon || '',
+                         qr_code: qrUrl,
                          order_id: order.id,
                          amount: order.total_amount
                      });
                  } else {
                      return errRes('支付宝错误: ' + (aliData.alipay_trade_precreate_response?.sub_msg || JSON.stringify(aliData)));
                  }
+             }
+             if (gateway.type.startsWith('usdt_')) {
+                 if (!config.wallet_address) return errRes('后台未配置该网络收款地址');
+
+                 // 汇率转换与并发防串单逻辑
+                 const rate = parseFloat(config.exchange_rate) || 1;
+                 const baseUsdt = parseFloat(order.total_amount) / rate;
+                 
+                 // 生成 0.0001 ~ 0.0099 的随机尾数，防止多人同时下单同一金额发生冲突
+                 const randomOffset = Math.floor(Math.random() * 39 + 1) / 100;
+                 const finalUsdtAmount = (baseUsdt + randomOffset).toFixed(2); 
+                 
+                 // 关键点：将这个精确的 4 位小数 U 金额存入 trade_no，用于等一下回调时的精确匹配
+                 await db.prepare("UPDATE orders SET trade_no=? WHERE id=?").bind(finalUsdtAmount, order.id).run();
+                 // ====== 【核心新增：下发按需监控指令给 xy-usk】 ======
+                 try {
+                     // 优先使用该网关配置中的 usk_api_url，确保多商户独立性
+                     if (config.usk_api_url && config.app_secret) {
+                         const netName = gateway.type.replace('usdt_', '').toUpperCase(); 
+                         // 异步下发请求，不阻塞用户看到支付界面的速度
+                         fetch(config.usk_api_url, {
+                             method: 'POST',
+                             headers: {
+                                 'Content-Type': 'application/json',
+                                 'Authorization': `Bearer ${config.app_secret}` // 使用后台填写的 Secret 进行双向鉴权
+                             },
+                             body: JSON.stringify({
+                                 address: config.wallet_address,
+                                 network: netName,
+                                 amount: finalUsdtAmount,
+                                 order_id: order.id
+                             })
+                         }).catch(e => console.error("通知监控系统失败:", e));
+                     }
+                 } catch (e) { console.error("异步触发监控节点异常", e); }
+                 // ====== 【指令下发结束】 ======
+
+                 return jsonRes({
+                     type: gateway.type,
+                     gateway_type: gateway.type,
+                     gateway_name: gateway.name,
+                     gateway_icon: config.icon || '',
+                     wallet_address: config.wallet_address,
+                     order_id: order.id,
+                     amount: finalUsdtAmount
+                 });
              }
              return errRes('未知的支付方式');
         }
@@ -1845,9 +1918,14 @@ async function handleApi(request, env, url, ctx) {
                 params[key] = value;
             }
             
-            const gateway = await db.prepare("SELECT config FROM pay_gateways WHERE type='alipay_f2f' AND active=1").first();
-            if (!gateway) { console.error('Alipay Notify: Gateway not found'); return new Response('fail'); }
-            const config = JSON.parse(gateway.config);
+            // 获取所有启用的支付宝配置，并根据回调传回的 app_id 寻找对应的那个支付宝账号
+            const gateways = await db.prepare("SELECT config FROM pay_gateways WHERE type='alipay_f2f' AND active=1").all();
+            let config = null;
+            for (const g of gateways.results) {
+                const c = JSON.parse(g.config);
+                if (c.app_id === params.app_id) { config = c; break; }
+            }
+            if (!config) { console.error('Alipay Notify: Gateway not found for this AppID'); return new Response('fail'); }
 
             const signVerified = await verifyAlipaySignature(params, config.alipay_public_key);
             
@@ -2172,6 +2250,107 @@ ${cardContentForCustomer}
                 }
             }
             return new Response('success');
+        }
+        if (path === '/api/notify/usdt' && method === 'POST') {
+            try {
+                const post = await request.json();
+                const { network, tx_hash, amount, sign } = post;
+
+                // 获取所有激活状态下的 USDT 网关配置
+                const gateways = await db.prepare("SELECT config FROM pay_gateways WHERE type LIKE 'usdt_%' AND active=1").all();
+                if (!gateways || gateways.results.length === 0) return new Response(JSON.stringify({code: 404, msg: "No active USDT gateways"}));
+    
+                let isValidSign = false;
+                for (const g of gateways.results) {
+                    const config = JSON.parse(g.config);
+                    const my_secret = config.app_secret || '';
+                    const msgBuffer = new TextEncoder().encode(network + tx_hash + amount + my_secret);
+                    const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+                    const calc_sign = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+                    if (calc_sign === sign) { 
+                        isValidSign = true; 
+                        break; 
+                    }
+                }
+    
+                if (!isValidSign) return new Response(JSON.stringify({code: 403, msg: "Invalid signature"}));
+
+                // 2. 精确金额匹配订单 (通过发起支付时存入 trade_no 的精确 U 金额来匹配)
+                // 这样做哪怕多个人同时买同价位商品，因为尾数不同，系统也能精准发货给对的人！
+                const checkOrder = await db.prepare("SELECT * FROM orders WHERE trade_no=? AND status=0 ORDER BY created_at DESC LIMIT 1").bind(String(amount)).first();
+                if (!checkOrder) return new Response(JSON.stringify({code: 404, msg: "Order not found or paid"}));
+                const out_trade_no = checkOrder.id;
+
+                // 3. 更新为已支付，并把 trade_no 覆盖更新为真实的链上交易哈希 tx_hash 留底
+                const updateRes = await db.prepare("UPDATE orders SET status=1, paid_at=?, trade_no=? WHERE id=? AND status=0").bind(time(), tx_hash, out_trade_no).run();
+
+                // 3. 复用发货核心
+                if (updateRes.success && updateRes.meta.changes === 1) {
+                    const order = await db.prepare("SELECT * FROM orders WHERE id=? AND status=1").bind(out_trade_no).first();
+                    if (order) {
+                        const adminConfigKeys = ['tg_active', 'tg_bot_token', 'tg_chat_id', 'brevo_active', 'brevo_key', 'brevo_sender', 'mail_to', 'site_name', 'outlook_active', 'outlook_client_id', 'outlook_client_secret', 'outlook_refresh_token', 'customer_outlook_active', 'customer_outlook_client_id', 'customer_outlook_client_secret', 'customer_outlook_refresh_token'];
+                        const placeholders = adminConfigKeys.map(() => '?').join(',');
+                        const systemConfig = {};
+                        const confRes = await db.prepare(`SELECT key, value FROM site_config WHERE key IN (${placeholders})`).bind(...adminConfigKeys).all();
+                        if (confRes && confRes.results) confRes.results.forEach(r => systemConfig[r.key] = r.value);
+
+                        let contentBody = ''; const allCardsContent = []; const stmts = []; const autoVariantIdsToUpdate = new Set();
+                        let newOrderStatus = 2; const isCartOrder = order.variant_id === 0; let singleVariant;
+
+                        try {
+                            if (isCartOrder) {
+                                const cartItems = JSON.parse(order.cards_sent || '[]');
+                                for (const item of cartItems) {
+                                    const variant = await db.prepare("SELECT auto_delivery, stock FROM variants WHERE id=?").bind(item.variantId).first();
+                                    if (!variant) continue;
+                                    if (variant.auto_delivery === 1) {
+                                        let cards;
+                                        if (item.buyMode === 'select' && item.selectedCardId) {
+                                            cards = await db.prepare("UPDATE cards SET status=1, order_id=? WHERE id=? AND status=0 RETURNING id, content").bind(out_trade_no, item.selectedCardId).all();
+                                        } else {
+                                            cards = await db.prepare("UPDATE cards SET status=1, order_id=? WHERE id IN (SELECT id FROM cards WHERE variant_id=? AND status=0 LIMIT ?) RETURNING id, content").bind(out_trade_no, item.variantId, item.quantity).all();
+                                        }
+                                        if (cards.results.length >= item.quantity) {
+                                            allCardsContent.push(...cards.results.map(c => `【${item.productName} - ${item.variantName}】\n${c.content}`));
+                                            stmts.push(db.prepare("UPDATE variants SET sales_count = sales_count + ? WHERE id=?").bind(item.quantity, item.variantId));
+                                            autoVariantIdsToUpdate.add(item.variantId);
+                                        } else newOrderStatus = 1; 
+                                    } else {
+                                        await db.prepare("UPDATE variants SET stock = stock - ?, sales_count = sales_count + ? WHERE id=? AND stock >= ?").bind(item.quantity, item.quantity, item.variantId, item.quantity).run();
+                                        allCardsContent.push(`【${item.productName} - ${item.variantName}】\n该商品为手动发货，请联系客服处理。`);
+                                        newOrderStatus = 1; 
+                                    }
+                                }
+                            } else {
+                                singleVariant = await db.prepare("SELECT auto_delivery, stock FROM variants WHERE id=?").bind(order.variant_id).first();
+                                if (singleVariant.auto_delivery === 1) {
+                                    let targetId = null; try { targetId = JSON.parse(order.cards_sent).target_id; } catch(e){}
+                                    let cards;
+                                    if (targetId) cards = await db.prepare("UPDATE cards SET status=1, order_id=? WHERE id=? AND status=0 RETURNING id, content").bind(out_trade_no, targetId).all();
+                                    else cards = await db.prepare("UPDATE cards SET status=1, order_id=? WHERE id IN (SELECT id FROM cards WHERE variant_id=? AND status=0 LIMIT ?) RETURNING id, content").bind(out_trade_no, order.variant_id, order.quantity).all();
+                                    
+                                    if (cards.results.length >= order.quantity) {
+                                        allCardsContent.push(...cards.results.map(c => c.content));
+                                        stmts.push(db.prepare("UPDATE variants SET sales_count = sales_count + ? WHERE id=?").bind(order.quantity, order.variant_id));
+                                        autoVariantIdsToUpdate.add(order.variant_id);
+                                    } else newOrderStatus = 1;
+                                } else {
+                                    await db.prepare("UPDATE variants SET stock = stock - ?, sales_count = sales_count + ? WHERE id=? AND stock >= ?").bind(order.quantity, order.quantity, order.variant_id, order.quantity).run();
+                                    allCardsContent.push(`【${order.product_name} - ${order.variant_name}】\n该商品为手动发货，请联系客服处理。`);
+                                    newOrderStatus = 1;
+                                }
+                            }
+                        } catch (e) { newOrderStatus = 1; }
+
+                        if (newOrderStatus === 2) stmts.push(db.prepare("UPDATE orders SET status=2, cards_sent=? WHERE id=?").bind(JSON.stringify(allCardsContent), out_trade_no));
+                        else if (newOrderStatus === 1) stmts.push(db.prepare("UPDATE orders SET cards_sent=? WHERE id=?").bind(JSON.stringify(allCardsContent), out_trade_no));
+                        if (stmts.length > 0) await db.batch(stmts);
+                    }
+                }
+                return new Response(JSON.stringify({code: 200, msg: "success"}));
+            } catch (e) {
+                return new Response(JSON.stringify({code: 500, msg: e.message}));
+            }
         }
     } catch (e) {
         console.error('API Error:', e);
