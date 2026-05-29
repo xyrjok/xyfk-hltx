@@ -60,7 +60,7 @@
         
         /* 卡密内容显示框 */
         .card-content-box {
-            background-color: #f8f9fa;
+            background-color: #dbedff;
             padding: 12px;
             border-radius: 6px;
             font-family: monospace;
@@ -144,7 +144,7 @@
                     <div class="tab-content">
                         <div class="tab-pane fade show active" id="by-contact">
                             <div id="local-cache-box" class="cache-hint d-none mb-3" onclick="queryByContact(true)">
-                                <div class="small"><i class="fas fa-history me-1"></i> 记录: <strong id="cache-contact-text"></strong></div>
+                                <div><i class="fas fa-history me-1"></i> 记录: <strong id="cache-contact-text"></strong></div>
                                 <i class="fas fa-chevron-right small"></i>
                             </div>
                             <div class="mb-3">
@@ -277,7 +277,7 @@
                     actionBtns = `
                         <div class="mt-2 pt-2 border-top text-end">
                             <button id="btn-del-${order.id}" class="btn btn-sm btn-outline-secondary me-2" onclick="deleteOrder('${order.id}')">删除</button>
-                            <a href="/pay?order_id=${order.id}&method=${order.payment_method || 'alipay_f2f'}" class="btn btn-sm btn-danger fw-bold">
+                            <a href="/pay?order_id=${order.id}&method=${order.payment_method || ''}" class="btn btn-sm btn-danger fw-bold">
                                 去支付 <i class="fas fa-angle-right"></i>
                             </a>
                         </div>
