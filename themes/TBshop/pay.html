@@ -7,18 +7,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
     <title>收银台</title>
-    
+
     <link href="/assets/css/bootstrap.min.css" rel="stylesheet">
     <link href="/assets/css/all.min.css" rel="stylesheet">
     <link href="/themes/TBshop/files/custom-theme.css" rel="stylesheet">
-    
+
     <style>
         .pay-card { min-height: 500px; }
         .pay-amount { font-size: 24px; font-weight: bold; color: var(--tb-orange); }
-        .pay-method-item { 
-            border: 1px solid #eee; border-radius: 6px; padding: 15px; 
+        .pay-method-item {
+            border: 1px solid #eee; border-radius: 6px; padding: 15px;
             cursor: default; display: flex; align-items: center;
-            margin-bottom: 10px; background: #fff5f0; border-color: var(--tb-orange);
+            margin-bottom: 10px; background: #fff; border-color: #ddd;
         }
         .pay-method-icon { width: 32px; height: 32px; margin-right: 10px; object-fit: contain; }
         .qr-placeholder {
@@ -27,8 +27,7 @@
             color: #999; font-size: 14px; position: relative;
         }
         .qr-placeholder img { max-width: 100%; max-height: 100%; }
-        
-        /* 倒计时样式 */
+
         .countdown-timer {
             font-size: 14px; color: #dc3545; font-weight: bold;
             background: #fff0f0; padding: 8px 15px; border-radius: 20px;
@@ -44,22 +43,22 @@
     <header class="mobile-header d-lg-none" id="global-mobile-header"></header>
     <div class="mobile-sidebar d-lg-none" id="mobile-sidebar"></div>
     <div class="mobile-overlay d-lg-none" id="mobile-overlay" onclick="togglePanel('mobile-sidebar', 'mobile-overlay')"></div>
-    
+
     <header class="tb-header d-none d-lg-block" id="global-pc-header"></header>
 
 
     <div class="container mt-4">
         <div class="row gx-3" id="main-content-row">
-            
+
             <div class="col-lg-9">
-                
+
                 <div class="module-box pay-card">
                     <div class="module-title">
                         <span><i class="fa fa-credit-card text-primary"></i> 收银台</span>
                     </div>
 
                     <div id="payment-checkout-area" class="p-3">
-                        
+
                         <div class="alert alert-light border d-flex justify-content-between align-items-center mb-4">
                             <div>
                                 <div class="text-muted small">订单号</div>
@@ -67,7 +66,8 @@
                             </div>
                             <div class="text-end">
                                 <div class="text-muted small">应付金额</div>
-                                <span class="pay-amount" id="pay-order-amount">--</span> <small>元</small>
+                                <span class="pay-amount" id="pay-order-amount">--</span> <small id="pay-unit"></small>
+
                             </div>
                         </div>
 
@@ -77,7 +77,7 @@
                         </div>
 
                         <div id="qr-code-section" class="text-center border-top pt-4">
-                            
+
                             <div id="countdown-box" class="countdown-timer" style="display:none;">
                                 <i class="fa fa-clock me-1"></i> 请在 <span id="countdown-time">05:00</span> 内完成支付
                             </div>
@@ -86,13 +86,6 @@
                                 <span id="qr-loading-text">等待发起支付...</span>
                             </div>
                             <div id="pay-status-tip" class="text-muted small">正在获取支付信息...</div>
-                            
-                            <div id="mobile-app-btn-container" class="mt-3 px-3" style="display: none;">
-                                <button id="open-alipay-btn" class="btn btn-primary w-100 py-3 fw-bold shadow" style="border-radius: 50px; font-size: 16px; background-color: #1678ff; border: none;">
-                                    <i class="fab fa-alipay me-2"></i> 打开支付宝APP支付
-                                </button>
-                                <div class="text-muted small mt-2">如无法唤起，请截屏后在支付宝扫一扫中选择相册</div>
-                            </div>
 
                             <button id="pay-btn" class="tb-btn-primary mt-3 px-5" style="width: auto; border-radius: 25px; display:none;" onclick="initiatePayment()">
                                 立即支付
@@ -108,9 +101,9 @@
             </div>
 
             <div class="col-lg-3 d-none d-lg-block">
-                <div id="sidebar-wrapper"> 
+                <div id="sidebar-wrapper">
                     <div id="global-sidebar-right"></div>
-                </div> 
+                </div>
             </div>
         </div>
     </div>
@@ -125,12 +118,11 @@
         let currentOrderId = null;
         let pollTimer = null;
         let countdownTimer = null;
-        // 增加一个计数器，用于支付成功后等待卡密生成的缓冲
-        let retryCount = 0; 
-        const MAX_RETRIES = 5; // 最多多等5次（约15秒）
+        let retryCount = 0;
+        const MAX_RETRIES = 5;
 
         const urlParams = new URLSearchParams(window.location.search);
-        let currentPaymentMethod = urlParams.get('method') || 'alipay_f2f';
+        let currentPaymentMethod = urlParams.get('method') || '';
 
         document.addEventListener('DOMContentLoaded', function() {
             if (typeof renderCommonLayout === 'function') {
@@ -138,7 +130,6 @@
             }
 
             currentOrderId = urlParams.get('order_id');
-            renderSelectedMethod(currentPaymentMethod);
 
             if(currentOrderId) {
                 document.getElementById('pay-order-id').textContent = currentOrderId;
@@ -149,19 +140,13 @@
             }
         });
 
-        function renderSelectedMethod(method) {
+        function renderSelectedMethod(name, icon) {
             const container = document.getElementById('pay-methods-container');
-            let html = '';
-            if (method === 'alipay_f2f') {
-                html = `<div class="col-12"><div class="pay-method-item active"><i class="fab fa-alipay text-primary fa-2x me-3"></i><div><div class="fw-bold">支付宝支付</div><small class="text-muted">推荐支付宝用户使用</small></div><i class="fa fa-check-circle text-success ms-auto fa-lg"></i></div></div>`;
-            } else if (method === 'wxpay') {
-                html = `<div class="col-12"><div class="pay-method-item active" style="background:#f0fff0; border-color:#09bb07;"><i class="fab fa-weixin text-success fa-2x me-3"></i><div><div class="fw-bold">微信支付</div><small class="text-muted">微信安全支付</small></div><i class="fa fa-check-circle text-success ms-auto fa-lg"></i></div></div>`;
-            } else if (method === 'usdt') {
-                html = `<div class="col-12"><div class="pay-method-item active" style="background:#f0fffa; border-color:#26a17b;"><span class="fw-bold me-3" style="color:#26a17b; font-size:18px;">USDT</span><div><div class="fw-bold">USDT 支付</div><small class="text-muted">TRC20 网络</small></div><i class="fa fa-check-circle text-success ms-auto fa-lg"></i></div></div>`;
-            } else {
-                html = `<div class="col-12 text-danger">未知的支付方式: ${method}</div>`;
-            }
-            container.innerHTML = html;
+            const displayName = name || '支付';
+            let iconHtml = icon
+                ? `<img src="${icon}" class="pay-method-icon">`
+                : `<i class="fas fa-credit-card text-primary fa-2x me-3"></i>`;
+            container.innerHTML = `<div class="col-12"><div class="pay-method-item active">${iconHtml}<div><div class="fw-bold">${displayName}</div><small class="text-muted">安全支付</small></div><i class="fa fa-check-circle text-success ms-auto fa-lg"></i></div></div>`;
         }
 
         function isMobile() {
@@ -187,7 +172,7 @@
             }
             tick();
         }
-        
+
         async function initiatePayment() {
             if (!currentOrderId) return;
             const btn = document.getElementById('pay-btn');
@@ -213,13 +198,23 @@
                 }
 
                 if (data.paid) {
-                    startPolling(); // 如果已支付，直接进入轮询逻辑检查卡密
+                    startPolling();
                     return;
                 }
 
-                if (data.type === 'qrcode' && data.qr_code) {
-                    if(data.amount) document.getElementById('pay-order-amount').innerText = data.amount;
+                // 统一渲染支付方式（使用后端返回的名称和图标）
+                if (data.gateway_name || data.gateway_type) {
+                    renderSelectedMethod(data.gateway_name, data.gateway_icon);
+                }
+                if (data.amount) document.getElementById('pay-order-amount').innerText = data.amount;
+                // 根据支付方式动态切换单位
+                if (data.type && data.type.startsWith('usdt_')) {
+                    document.getElementById('pay-unit').innerText = 'USDT';
+                } else {
+                    document.getElementById('pay-unit').innerText = '元';
+                }
 
+                if (data.type === 'qrcode' && data.qr_code) {
                     qrContainer.innerHTML = '';
                     new QRCode(qrContainer, {
                         text: data.qr_code,
@@ -230,16 +225,34 @@
 
                     tipEl.innerHTML = '请扫描上方二维码付款';
                     document.getElementById('poll-status').style.display = 'block';
-
-                    if (isMobile() && currentPaymentMethod === 'alipay_f2f') {
-                        const mobileContainer = document.getElementById('mobile-app-btn-container');
-                        const mobileBtn = document.getElementById('open-alipay-btn');
-                        const alipayScheme = 'alipays://platformapi/startapp?appId=20000067&url=' + encodeURIComponent(data.qr_code);
-                        mobileContainer.style.display = 'block';
-                        mobileBtn.onclick = function() { window.location.href = alipayScheme; };
-                    }
                     startPolling();
                 }
+
+                if (data.type && data.type.startsWith('usdt_') && data.wallet_address) {
+                    qrContainer.innerHTML = '';
+                    new QRCode(qrContainer, {
+                        text: data.wallet_address,
+                        width: 180, height: 180,
+                        colorDark : "#000000", colorLight : "#ffffff",
+                        correctLevel : QRCode.CorrectLevel.H
+                    });
+
+                    tipEl.innerHTML = `
+                        <div class="text-dark fw-bold mt-2 mb-1">
+                            请转账确切金额：<span class="text-danger fs-5" style="user-select: all;">${data.amount}</span> USDT
+                        </div>
+                        <div class="small fw-bold text-danger mb-2">务必精确到小数点后所有位数，否则无法自动发货！</div>
+                        <div class="small text-muted mb-1 text-start"><strong>${data.gateway_name || 'USDT'}</strong>收款钱包地址 (点击复制):</div>
+                        <div class="small user-select-all text-break text-start"
+                             style="background: #f8f9fa; padding: 10px; border-radius: 6px; border: 1px dashed #ccc; cursor: pointer;"
+                             onclick="navigator.clipboard.writeText('${data.wallet_address}'); alert('地址已复制！');">
+                            <strong>${data.wallet_address}</strong>
+                        </div>
+                    `;
+                    document.getElementById('poll-status').style.display = 'block';
+                    startPolling();
+                }
+
             } catch (e) {
                 console.error(e);
                 qrContainer.innerHTML = '<span class="text-danger">网络错误</span>';
@@ -249,15 +262,14 @@
             }
         }
 
-        // [核心修改] 优化后的轮询逻辑
         function startPolling() {
             if (pollTimer) clearInterval(pollTimer);
-            
+
             pollTimer = setInterval(async () => {
                 try {
                     const res = await fetch(`/api/shop/order/status?order_id=${currentOrderId}`);
                     const data = await res.json();
-                    
+
                     if (data.status >= 2) {
                         clearInterval(pollTimer);
                         handlePaySuccess(data);
@@ -265,46 +277,39 @@
                     }
 
                     if (data.status === 1) {
-                        // 【兼容模式判断】：检查是否已经拿到了有效的卡密数据
                         let hasValidCards = false;
-                        
+
                         if (data.cards && Array.isArray(data.cards) && data.cards.length > 0) {
                             const firstCard = data.cards[0];
-                            // 兼容 1: 如果是购物车合并订单，卡密是对象 (object)
                             if (typeof firstCard === 'object' && firstCard !== null) {
                                 hasValidCards = true;
-                            } 
-                            // 兼容 2: 如果是普通单件商品直购，卡密是字符串 (string)
+                            }
                             else if (typeof firstCard === 'string' && firstCard.trim() !== '') {
                                 hasValidCards = true;
                             }
                         }
 
-                        // 如果还没拿到有效卡密，且未超过最大重试次数，就继续等待 (给数据库提取数据留出时间)
                         if (!hasValidCards && retryCount < MAX_RETRIES) {
                             retryCount++;
-                            return; 
+                            return;
                         }
 
-                        // 如果拿到了有效卡密，或者实在等太久超时了，就结束轮询去渲染结果
                         clearInterval(pollTimer);
                         handlePaySuccess({ status: 1, cards: data.cards || [] });
                         return;
                     }
                 } catch(e) { console.error('Check status failed', e); }
-            }, 3000); 
+            }, 3000);
         }
 
         function handlePaySuccess(data) {
             const qrContainer = document.getElementById('qr-container');
             const tipEl = document.getElementById('pay-status-tip');
             const pollStatus = document.getElementById('poll-status');
-            const mobileBtn = document.getElementById('mobile-app-btn-container');
             const countdownBox = document.getElementById('countdown-box');
 
             if(pollTimer) clearInterval(pollTimer);
             if(pollStatus) pollStatus.style.display = 'none';
-            if(mobileBtn) mobileBtn.style.display = 'none';
             if(countdownBox) countdownBox.style.display = 'none';
             if(tipEl) tipEl.style.display = 'none';
 
@@ -324,7 +329,6 @@
                 }
             }
 
-            // 【核心修复】：智能提取卡密：遇到单件字符串直接拿，遇到购物车多件对象就带上商品名
             let processedCards = [];
             cardsArray.forEach(item => {
                 if (typeof item === 'string' && item.trim() !== "") {
@@ -383,6 +387,6 @@
             }
         }
     </script>
-    
+
 </body>
 </html>
