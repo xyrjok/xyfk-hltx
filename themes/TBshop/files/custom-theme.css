@@ -350,7 +350,7 @@ header, .tb-header, .mobile-header, .container, .main-content { flex-shrink: 0; 
     align-items: center; justify-content: center;
     padding: 1px 6px; height: 38px; min-width: 38px;
     font-size: 25px; border: 1px solid #ddd; border-radius: 4px;
-    margin-right: 12px; cursor: pointer; background: #fff; transition: all 0.2s;
+    margin: 0 10px 10px 0; cursor: pointer; background: #fff; transition: all 0.2s;
 }
 .payment-option:hover { border-color: #bbb; }
 .payment-option.active { border-color: #dc3545; }
