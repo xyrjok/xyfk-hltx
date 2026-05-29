@@ -257,7 +257,7 @@
                     actionBtns = `
                         <div class="mt-2 text-end border-top pt-2">
                             <button id="btn-del-${order.id}" class="btn btn-sm btn-outline-secondary me-2" onclick="deleteOrder('${order.id}')">删除订单</button>
-                            <a href="/pay?order_id=${order.id}&method=${order.payment_method || 'alipay_f2f'}" class="btn btn-sm btn-danger fw-bold">
+                            <a href="/pay?order_id=${order.id}&method=${order.payment_method || ''}" class="btn btn-sm btn-danger fw-bold">
                                 去支付 <i class="fa fa-angle-right"></i>
                             </a>
                         </div>
