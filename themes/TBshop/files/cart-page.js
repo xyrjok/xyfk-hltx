@@ -5,7 +5,7 @@
 
 let cart = [];
 let isEditing = false;
-let cartPaymentMethod = 'alipay_f2f'; // 默认选中支付宝
+let cartPaymentMethod = '';
 
 /** 页面加载 **/
 document.addEventListener('DOMContentLoaded', async () => {
@@ -116,7 +116,7 @@ function loadCart() {
 function renderPCItem(rawItem, index) {
     const item = normalizeItem(rawItem);
     const subtotal = (item.price * item.quantity).toFixed(2);
-    const specDisplay = `<span class="text-muted">${item.sku}</span>`;
+    const spec_display = `<span class="text-muted">${item.sku}</span>`;
     const productLink = item.productId ? `/product?id=${item.productId}` : 'javascript:void(0)';
     
     let extraInfo = '';
@@ -145,7 +145,7 @@ function renderPCItem(rawItem, index) {
                         ${item.name}
                     </a>
                     <div class="pc-cart-sku small" style="font-size:12px; color:#888;">
-                        ${specDisplay}${extraInfo}
+                        ${spec_display}${extraInfo}
                     </div>
                 </div>
             </div>
@@ -361,7 +361,7 @@ window.handleCheckout = async function() {
         if(data.error) {
             // [新增] 拦截未支付订单错误
             if (data.error.includes('未支付订单')) {
-                if(confirm('提示：' + data.error + '\n\n点击“确定”前往查单页面处理。')) {
+                if(confirm('提示：' + data.error + '\n\n点击"确定"前往查单页面处理。')) {
                     window.location.href = '/orders';
                     return;
                 }
@@ -378,6 +378,7 @@ window.handleCheckout = async function() {
         btns.forEach(b => { b.disabled = false; b.innerText = '立即结算'; });
     }
 }
+
 async function loadCartGateways() {
     try {
         const res = await fetch('/api/shop/gateways');
@@ -385,14 +386,16 @@ async function loadCartGateways() {
         const containers = ['cart-payment-list-pc', 'cart-payment-list-mobile'];
         if (!list || list.length === 0) return;
         
-        cartPaymentMethod = list[0].type; // 默认选中第一个
+        cartPaymentMethod = list[0].id; // 默认选中第一个
         const html = list.map((g, index) => {
             const activeClass = index === 0 ? 'active' : '';
             let iconHtml = '<i class="fas fa-credit-card"></i>';
-            if (g.type.includes('alipay')) iconHtml = '<i class="fab fa-alipay" style="color:#1678ff;"></i>';
-            else if (g.type.includes('wxpay')) iconHtml = '<i class="fab fa-weixin" style="color:#09bb07;"></i>';
-            else if (g.type.includes('usdt')) iconHtml = '<span style="font-size:12px; font-weight:bold; color:#26a17b;">USDT</span>';
-            return `<div class="payment-option ${activeClass}" data-method="${g.type}" onclick="selectCartPayment('${g.type}', this)">
+            if (g.icon) {
+                iconHtml = `<img src="${g.icon}" style="width:20px; height:20px; object-fit:contain;"> <span style="font-size:13px; font-weight:bold; margin-left:4px;">${g.name}</span>`;
+            } else {
+                iconHtml = `<i class="fas fa-credit-card" style="color:#1678ff;"></i> <span style="font-size:13px; font-weight:bold; margin-left:4px;">${g.name}</span>`;
+            }
+            return `<div class="payment-option ${activeClass}" data-method="${g.id}" onclick="selectCartPayment('${g.id}', this)" title="${g.name}">
                         ${iconHtml}<div class="payment-check-mark"><i class="fa fa-check"></i></div>
                     </div>`;
         }).join('');
