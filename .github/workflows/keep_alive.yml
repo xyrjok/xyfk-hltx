@@ -16,6 +16,6 @@ jobs:
           # ⬇️⬇️⬇️ 请将下面的 https://你的域名.com 替换为你真实的网站地址 ⬇️⬇️⬇️
           # 例如: curl -s "https://faka.example.com/api/cron/outlook"
           
-          curl -s "https://xyfk-hltx.pages.dev/api/cron/outlook?key=20260210"
+          curl -s -f "https://xyfk-hltx.pages.dev/api/cron/outlook?key=20260210"
           
           echo "Keep-Alive request sent."
