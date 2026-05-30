@@ -115,6 +115,33 @@ export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
         const path = url.pathname;
+        // === [新增] 访客被动触发机制 (7天自动执行一次刷新Outlook邮箱的Token) ===
+        try {
+            ctx.waitUntil((async () => {
+                const db = env.xyfk;
+                const now = Math.floor(Date.now() / 1000);
+                let lastTime = 0;
+                
+                try {
+                    // 查询上次刷新的时间记录
+                    const row = await db.prepare("SELECT value FROM site_config WHERE key = 'last_outlook_refresh_time'").first();
+                    if (row && row.value) lastTime = parseInt(row.value);
+                } catch(e) {}
+
+                // 604800秒 = 7天。如果当前时间距离上次刷新超过7天，则触发
+                if (now - lastTime > 604800) {
+                    // 1. 抢先更新数据库的时间戳，防止同一时间多个访客导致重复执行
+                    await db.prepare("INSERT INTO site_config (key, value) VALUES ('last_outlook_refresh_time', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(now.toString()).run();
+                    
+                    // 2. 内部静默请求你的刷新 API
+                    await refreshOutlookTokens(db);
+                    console.log("被动触发成功：已刷新 Outlook Token");
+                }
+            })());
+        } catch (e) {
+            console.error("被动触发器异常:", e);
+        }
+        
         if (path === '/favicon.ico') {
             try {
                 const db = env.xyfk;
@@ -297,37 +324,6 @@ export default {
 
             return response;
         }
-        // ====== [新增] GitHub 图片代理 (支持私有仓库) ======
-        if (path.startsWith('/gh_image/')) {
-            const filename = path.replace('/gh_image/', '');
-            if (!/\.(jpg|jpeg|png|gif|webp|ico|svg)$/i.test(filename)) {
-                return new Response('Forbidden', { status: 403 });
-            }
-            if (filename.includes('..') || filename.includes('?')) {
-                return new Response('Forbidden', { status: 403 });
-            }
-            let conf = {};
-            try {
-                const db = env.xyfk;
-                (await db.prepare("SELECT key, value FROM site_config WHERE key IN ('gh_user','gh_repo','gh_token')").all()).results.forEach(r => conf[r.key] = r.value);
-            } catch(e) {}
-
-            if (!conf.gh_user || !conf.gh_repo) return new Response('Config missing', { status: 404 });
-
-            const rawUrl = `https://raw.githubusercontent.com/${conf.gh_user}/${conf.gh_repo}/main/${filename}`;
-            const headers = { 'User-Agent': 'Cloudflare-Worker' };
-            if (conf.gh_token) headers['Authorization'] = `token ${conf.gh_token}`;
-
-            const imgRes = await fetch(rawUrl, { headers });
-            if (!imgRes.ok) return new Response('Image not found', { status: 404 });
-
-            const newHeaders = new Headers(imgRes.headers);
-            newHeaders.set('Access-Control-Allow-Origin', '*');
-            newHeaders.set('Cache-Control', 'public, max-age=2592000'); // 缓存30天
-            newHeaders.delete('Authorization'); // 移除敏感头
-
-            return new Response(imgRes.body, { status: imgRes.status, headers: newHeaders });
-        }
         // ====== [新增] Telegram 图片代理 ======
         if (path.startsWith('/tg_image/')) {
             const filePath = path.replace('/tg_image/', '');
@@ -351,6 +347,22 @@ export default {
             newHeaders.set('Access-Control-Allow-Origin', '*');
             newHeaders.set('Cache-Control', 'public, max-age=2592000');
             return new Response(imgRes.body, { status: imgRes.status, headers: newHeaders });
+        }
+
+        // ====== [新增] R2 图片代理路由 ======
+        if (path.startsWith('/r2_image/')) {
+            if (!env.r2) return new Response('R2 not configured', { status: 500 });
+            const key = path.replace('/r2_image/', '');
+            if (!key || key.includes('..') || key.includes('?')) return new Response('Forbidden', { status: 403 });
+            
+            const object = await env.r2.get(key);
+            if (!object) return new Response('Not Found', { status: 404 });
+            
+            const headers = new Headers();
+            headers.set('Content-Type', object.httpMetadata?.contentType || 'image/jpeg');
+            headers.set('Cache-Control', 'public, max-age=2592000');
+            headers.set('Access-Control-Allow-Origin', '*');
+            return new Response(object.body, { headers });
         }
         // === 3. 默认回退 ===
         return env.ASSETS.fetch(request);
@@ -394,7 +406,55 @@ async function injectMetaTags(originalResponse, data) {
 
 // =============================================
 // === 完整的 API 处理逻辑 ===
-// =============================================
+// =============================================// === Outlook Token 刷新核心逻辑（被动触发和 Cron 端点共用） ===
+async function refreshOutlookTokens(db) {
+    const keys = [
+        'outlook_active', 'outlook_client_id', 'outlook_client_secret', 'outlook_refresh_token',
+        'customer_outlook_active', 'customer_outlook_client_id', 'customer_outlook_client_secret', 'customer_outlook_refresh_token'
+    ];
+    const placeholders = keys.map(() => '?').join(',');
+    const confRes = await db.prepare(`SELECT key, value FROM site_config WHERE key IN (${placeholders})`).bind(...keys).all();
+    const config = {};
+    if (confRes && confRes.results) confRes.results.forEach(r => config[r.key] = r.value);
+
+    const logs = [];
+    const refreshTokenLogic = async (prefix) => {
+        const active = config[`${prefix}_active`];
+        const clientId = config[`${prefix}_client_id`];
+        const clientSecret = config[`${prefix}_client_secret`] || '';
+        const refreshToken = config[`${prefix}_refresh_token`];
+        if (active !== '1' || !clientId || !refreshToken) {
+            logs.push(`[${prefix}] Skipped: Not active or missing config`);
+            return;
+        }
+        try {
+            const tokenUrl = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
+            const params = new URLSearchParams();
+            params.append('client_id', clientId);
+            if (clientSecret) params.append('client_secret', clientSecret);
+            params.append('refresh_token', refreshToken);
+            params.append('grant_type', 'refresh_token');
+            params.append('scope', 'Mail.Send offline_access');
+            const tokenRes = await fetch(tokenUrl, { method: 'POST', body: params });
+            const tokenData = await tokenRes.json();
+            if (tokenData.refresh_token) {
+                const dbKey = `${prefix}_refresh_token`;
+                await db.prepare(`INSERT INTO site_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(dbKey, tokenData.refresh_token).run();
+                logs.push(`[${prefix}] Success: Token refreshed and saved.`);
+            } else if (tokenData.access_token) {
+                logs.push(`[${prefix}] Success: Access Token retrieved (No new Refresh Token).`);
+            } else {
+                logs.push(`[${prefix}] Failed: ${tokenData.error_description || JSON.stringify(tokenData)}`);
+            }
+        } catch (e) {
+            logs.push(`[${prefix}] Error: ${e.message}`);
+        }
+    };
+    await Promise.all([refreshTokenLogic('outlook'), refreshTokenLogic('customer_outlook')]);
+    return logs;
+}
+
+
 async function handleApi(request, env, url, ctx) {
     const method = request.method;
     const path = url.pathname;
@@ -1032,10 +1092,27 @@ async function handleApi(request, env, url, ctx) {
                 return jsonRes({ success: true, count: batch.length });
             }
 
-            // 6. 批量删除图片
+            // 6. 批量删除图片 (支持同时删除 R2 存储源文件)
             if (path === '/api/admin/image/delete' && method === 'POST') {
-                const { ids } = await request.json(); // ids 是数组 [1, 2, 3]
+                const { ids, deleteStorage } = await request.json();
                 if (!ids || ids.length === 0) return errRes('未选择图片');
+                
+                // 如果勾选了同时删除存储源文件，先查询并删除 R2 中的文件
+                if (deleteStorage) {
+                    const ph = ids.map(() => '?').join(',');
+                    const imgs = (await db.prepare(`SELECT url FROM images WHERE id IN (${ph})`).bind(...ids).all()).results;
+                    
+                    // 删除 R2 文件
+                    if (env.r2) {
+                        const r2Keys = imgs
+                            .map(i => i.url)
+                            .filter(u => u && u.startsWith('/r2_image/'))
+                            .map(u => u.replace('/r2_image/', ''));
+                        for (const key of r2Keys) {
+                            try { await env.r2.delete(key); } catch(e) { console.error('R2 delete error:', key, e); }
+                        }
+                    }
+                }
                 
                 const placeholders = ids.map(() => '?').join(',');
                 await db.prepare(`DELETE FROM images WHERE id IN (${placeholders})`).bind(...ids).run();
@@ -1127,52 +1204,19 @@ async function handleApi(request, env, url, ctx) {
 
             // ====== [核心网关] 统一智能上传分发接口 ======
             if (path === '/api/admin/image/upload' && method === 'POST') {
-                // 读取用户在后台设置的默认图床，如果没设置，默认走 GitHub
+                // 读取用户在后台设置的默认图床，如果没设置，默认走通用外部图床
                 const provider = (await db.prepare("SELECT value FROM site_config WHERE key='default_upload_provider'").first())?.value || 'custom';
                 // 进行无缝内部路由重定向 (直接递归调用原本写好的具体接口，性能损耗为 0)
-                if (provider === 'github') {
-                    return handleApi(request, env, new URL('/api/admin/gh/upload', request.url), ctx);
-                } else if (provider === 'custom') {
+                if (provider === 'r2') {
+                    return handleApi(request, env, new URL('/api/admin/r2/upload', request.url), ctx);
+                }
+                else if (provider === 'custom') {
                     return handleApi(request, env, new URL('/api/admin/image/external_upload', request.url), ctx);
                 }
                 else if (provider === 'telegram') {
                     return handleApi(request, env, new URL('/api/admin/tg/upload', request.url), ctx);
                 }
                 return errRes('未知的图床提供商设置，请检查后台配置');
-            }
-            // ====== [新增] GitHub 图床接口 (上传/列表/删除) ======
-            if (path.startsWith('/api/admin/gh/')) {
-                // 读取配置
-                const conf = {};
-                (await db.prepare("SELECT key, value FROM site_config WHERE key IN ('gh_token','gh_user','gh_repo')").all()).results.forEach(r => conf[r.key] = r.value);
-                if (!conf.gh_token || !conf.gh_repo || !conf.gh_user) return errRes('请先在系统设置配置 gh_token, gh_user, gh_repo');
-                if (path === '/api/admin/gh/upload' && method === 'POST') {
-                    const formData = await request.formData();
-                    const file = formData.get('file');
-                    if (!file) return errRes('未选择文件');
-                    const extMatch = file.name.match(/\.(jpg|jpeg|png|gif|webp|ico|svg)$/i);
-                    if (!extMatch) return errRes('由于安全策略，仅允许上传合法图片格式');
-                    const safeFilename = crypto.randomUUID().replace(/-/g, '') + extMatch[0].toLowerCase();
-                    const filename = 'image/' + Date.now() + '_' + safeFilename;
-                    const u8 = new Uint8Array(await file.arrayBuffer());
-                    let binary = '';
-                    for (let i = 0; i < u8.length; i += 32768) {
-                        binary += String.fromCharCode(...u8.subarray(i, i + 32768));
-                    }
-                    const contentBase64 = btoa(binary);
-                    const ghRes = await fetch(`https://api.github.com/repos/${conf.gh_user}/${conf.gh_repo}/contents/${filename}`, {
-                        method: 'PUT',
-                        headers: { 'Authorization': `Bearer ${conf.gh_token}`, 'User-Agent': 'Cloudflare-Worker', 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ message: 'Upload via Admin', content: contentBase64 })
-                    });
-                    const ghData = await ghRes.json();
-                    if (ghRes.status !== 201 && ghRes.status !== 200) return errRes(ghData.message || '上传失败');
-                    const downloadUrl = `/gh_image/${filename}`;
-                    try { await db.prepare("INSERT INTO images (category_id, url, name, created_at) VALUES (1, ?, ?, ?)").bind(downloadUrl, file.name, time()).run(); } catch(e){}
-                    
-                    return jsonRes({ location: downloadUrl });
-                }
-
             }
             // ====== [新增] Telegram 图床接口 ======
             if (path === '/api/admin/tg/upload' && method === 'POST') {
@@ -1259,6 +1303,53 @@ async function handleApi(request, env, url, ctx) {
                         return errRes('外部API上传请求异常: ' + e.message);
                     }
                 }
+
+            // ====== [新增] Cloudflare R2 图床上传接口 ======
+            if (path === '/api/admin/r2/upload' && method === 'POST') {
+                if (!env.r2) return errRes('R2 bucket 未绑定，请在 Cloudflare Pages 设置 → Functions → R2 bucket bindings 中添加变量名 r2');
+                const formData = await request.formData();
+                const file = formData.get('file');
+                if (!file) return errRes('未选择文件');
+                
+                // 生成唯一文件名：日期/UUID.ext
+                const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+                const datePrefix = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+                const key = `images/${datePrefix}/${uuid()}.${ext}`;
+                
+                // 上传到 R2
+                await env.r2.put(key, file.stream(), {
+                    httpMetadata: { contentType: file.type || 'image/jpeg' }
+                });
+                
+                // 构建访问 URL
+                const r2Domain = (await db.prepare("SELECT value FROM site_config WHERE key='r2_public_domain'").first())?.value || '';
+                let downloadUrl = '';
+                if (r2Domain) {
+                    downloadUrl = `https://${r2Domain.replace(/^https?:\/\//, '')}/${key}`;
+                } else {
+                    downloadUrl = `/r2_image/${key}`;
+                }
+                
+                // 记录到 images 表
+                try {
+                    await db.prepare("INSERT INTO images (category_id, url, name, created_at) VALUES (1, ?, ?, ?)")
+                        .bind(downloadUrl, file.name, time()).run();
+                } catch(e) {}
+                
+                return jsonRes({ location: downloadUrl, key: key });
+            }
+
+            // ====== [新增] Cloudflare R2 批量删除接口 ======
+            if (path === '/api/admin/r2/delete' && method === 'POST') {
+                if (!env.r2) return errRes('R2 bucket 未绑定');
+                const { keys } = await request.json();
+                if (!keys || keys.length === 0) return errRes('未提供文件 key');
+                let deleted = 0;
+                for (const key of keys) {
+                    try { await env.r2.delete(key); deleted++; } catch(e) { console.error('R2 delete error:', key, e); }
+                }
+                return jsonRes({ success: true, deleted });
+            }
             // --- 系统设置 API (已修改: 支持 UPSERT) ---
             if (path === '/api/admin/settings/get') {
                 const res = await db.prepare("SELECT * FROM site_config").all();
@@ -1466,75 +1557,9 @@ async function handleApi(request, env, url, ctx) {
         // ===========================
         // [新增] Outlook Token 保活接口
         // 【安全修复】增加简单的 key 验证，防止被恶意扫描消耗资源
-        // 请记得将你的定时任务 URL 改为：/api/cron/outlook?key=123456
-        if (path === '/api/cron/outlook' && url.searchParams.get('key') === '20260210') {
-            // 1. 读取配置 (同时读取管理员和客户的 Outlook 配置)
-            const keys = [
-                'outlook_active', 'outlook_client_id', 'outlook_client_secret', 'outlook_refresh_token',
-                'customer_outlook_active', 'customer_outlook_client_id', 'customer_outlook_client_secret', 'customer_outlook_refresh_token'
-            ];
-            // 动态构建占位符
-            const placeholders = keys.map(() => '?').join(',');
-            const confRes = await db.prepare(`SELECT key, value FROM site_config WHERE key IN (${placeholders})`).bind(...keys).all();
-            
-            const config = {};
-            if (confRes && confRes.results) {
-                confRes.results.forEach(r => config[r.key] = r.value);
-            }
-
-            const logs = [];
-
-            // 定义刷新逻辑封装函数
-            const refreshTokenLogic = async (prefix) => {
-                const active = config[`${prefix}_active`];
-                const clientId = config[`${prefix}_client_id`];
-                const clientSecret = config[`${prefix}_client_secret`] || ''; // 部分应用可能无需 secret
-                const refreshToken = config[`${prefix}_refresh_token`];
-
-                // 如果未开启或缺少必要参数，直接跳过
-                if (active !== '1' || !clientId || !refreshToken) {
-                    logs.push(`[${prefix}] Skipped: Not active or missing config`);
-                    return;
-                }
-
-                try {
-                    const tokenUrl = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
-                    const params = new URLSearchParams();
-                    params.append('client_id', clientId);
-                    if (clientSecret) params.append('client_secret', clientSecret);
-                    params.append('refresh_token', refreshToken);
-                    params.append('grant_type', 'refresh_token');
-                    params.append('scope', 'Mail.Send offline_access');
-
-                    const tokenRes = await fetch(tokenUrl, { method: 'POST', body: params });
-                    const tokenData = await tokenRes.json();
-
-                    if (tokenData.refresh_token) {
-                        // 获取到新的 refresh_token，更新数据库
-                        const dbKey = `${prefix}_refresh_token`;
-                        await db.prepare(`
-                            INSERT INTO site_config (key, value) VALUES (?, ?) 
-                            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                        `).bind(dbKey, tokenData.refresh_token).run();
-                        
-                        logs.push(`[${prefix}] Success: Token refreshed and saved.`);
-                    } else if (tokenData.access_token) {
-                        // 某些情况下微软可能只返回 access_token 而不返回新的 refresh_token (此时旧的仍有效，但也算成功)
-                        logs.push(`[${prefix}] Success: Access Token retrieved (No new Refresh Token).`);
-                    } else {
-                        logs.push(`[${prefix}] Failed: ${tokenData.error_description || JSON.stringify(tokenData)}`);
-                    }
-                } catch (e) {
-                    logs.push(`[${prefix}] Error: ${e.message}`);
-                }
-            };
-
-            // 2. 并行执行刷新 (管理员 + 客户)
-            await Promise.all([
-                refreshTokenLogic('outlook'),
-                refreshTokenLogic('customer_outlook')
-            ]);
-
+        // 复用 ADMIN_TOKEN 鉴权，访问：/api/cron/outlook?key=你的ADMIN_TOKEN
+        if (path === '/api/cron/outlook' && url.searchParams.get('key') === env.ADMIN_TOKEN) {
+            const logs = await refreshOutlookTokens(db);
             return jsonRes({ status: 'finished', logs });
         }
 
@@ -1960,7 +1985,7 @@ async function handleApi(request, env, url, ctx) {
                     // --- 1. 读取配置 (新增客户通知配置) ---
                     const adminConfigKeys = [
                         'tg_active', 'tg_bot_token', 'tg_chat_id', 
-                        'brevo_active', 'brevo_key', 'brevo_sender', 'mail_to', 'site_name',
+                        'mail_to', 'site_name',
                         'outlook_active', 'outlook_client_id', 'outlook_client_secret', 'outlook_refresh_token'
                     ];
                     // [新增] 客户通知的配置键
@@ -2155,7 +2180,7 @@ ${contentBody}
 联系方式：${order.contact}
 订单号：${order.id}`;
 
-                    // Telegram/Outlook/Brevo 推送 (保持原有的)
+                    // Telegram/Outlook 推送
                     if (systemConfig.tg_active === '1' && systemConfig.tg_bot_token && systemConfig.tg_chat_id) {
                         notifications.push(fetch(`https://api.telegram.org/bot${systemConfig.tg_bot_token}/sendMessage`, {
                             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2164,17 +2189,6 @@ ${contentBody}
                     }
                     if (systemConfig.outlook_active === '1' && systemConfig.outlook_client_id && systemConfig.outlook_refresh_token && systemConfig.mail_to) {
                         notifications.push(sendOutlookMail(db, systemConfig, 'outlook', systemConfig.mail_to, `新订单通知：${order.id}`, msgText));
-                    }
-                    if (systemConfig.brevo_active === '1' && systemConfig.brevo_key && systemConfig.mail_to && systemConfig.brevo_sender) {
-                        notifications.push(fetch("https://api.brevo.com/v3/smtp/email", {
-                            method: "POST", headers: { "accept": "application/json", "api-key": systemConfig.brevo_key, "content-type": "application/json" },
-                            body: JSON.stringify({
-                                "sender": { "email": systemConfig.brevo_sender, "name": systemConfig.site_name || "夏雨自动发货系统" },
-                                "to": [{ "email": systemConfig.mail_to }],
-                                "subject": `新订单通知：${order.id}`,
-                                "htmlContent": msgText.replace(/\n/g, '<br>')
-                            })
-                        }));
                     }
                     
                     // B. [新增] 客户发货通知
@@ -2288,7 +2302,7 @@ ${cardContentForCustomer}
                 if (updateRes.success && updateRes.meta.changes === 1) {
                     const order = await db.prepare("SELECT * FROM orders WHERE id=? AND status=1").bind(out_trade_no).first();
                     if (order) {
-                        const adminConfigKeys = ['tg_active', 'tg_bot_token', 'tg_chat_id', 'brevo_active', 'brevo_key', 'brevo_sender', 'mail_to', 'site_name', 'outlook_active', 'outlook_client_id', 'outlook_client_secret', 'outlook_refresh_token', 'customer_outlook_active', 'customer_outlook_client_id', 'customer_outlook_client_secret', 'customer_outlook_refresh_token'];
+                        const adminConfigKeys = ['tg_active', 'tg_bot_token', 'tg_chat_id', 'mail_to', 'site_name', 'outlook_active', 'outlook_client_id', 'outlook_client_secret', 'outlook_refresh_token', 'customer_outlook_active', 'customer_outlook_client_id', 'customer_outlook_client_secret', 'customer_outlook_refresh_token'];
                         const placeholders = adminConfigKeys.map(() => '?').join(',');
                         const systemConfig = {};
                         const confRes = await db.prepare(`SELECT key, value FROM site_config WHERE key IN (${placeholders})`).bind(...adminConfigKeys).all();
