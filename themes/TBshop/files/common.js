@@ -651,8 +651,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // 2. 全局点击事件委托（高度浓缩逻辑）
     document.body.addEventListener('click', e => {
         const t = e.target, cid = t.id;
-        if (t.tagName === 'IMG' && t.closest('#article-content, #detail-left-content, #detail-right-content, #product-content')) {
-            imgs = Array.from(t.closest('#article-content, #detail-left-content, #detail-right-content, #product-content').querySelectorAll('img')).map(i => i.src);
+        if (t.tagName === 'IMG' && t.closest('#article-content, #detail-left-content, #detail-right-content, #product-content') && !t.closest('.payment-option, .qr-popup')) {
+            imgs = Array.from(t.closest('#article-content, #detail-left-content, #detail-right-content, #product-content').querySelectorAll('img')).filter(i => !i.closest('.payment-option, .qr-popup')).map(i => i.src);
             idx = imgs.indexOf(t.src);
             if (idx > -1) { imgEl.src = imgs[idx]; lb.classList.add('show'); }
         } else if (cid === 'xy-close' || cid === 'xy-lb') {
