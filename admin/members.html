@@ -84,6 +84,7 @@
                     <div class="col-auto">
                         <button class="btn btn-primary btn-sm" onclick="loadMembers()"><i class="fas fa-search"></i> 搜索</button>
                         <button class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('search-input').value='';loadMembers()"><i class="fas fa-redo"></i> 重置</button>
+                        <button class="btn btn-success btn-sm ms-2" onclick="openAddMember()"><i class="fas fa-user-plus"></i> 添加会员</button>
                     </div>
                     <div class="col-auto ms-auto">
                         <span class="text-muted small">共 <strong id="member-count">0</strong> 名会员</span>
@@ -113,6 +114,51 @@
                         </tbody>
                     </table>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 添加会员 Modal -->
+<div class="modal fade" id="addMemberModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-user-plus text-success"></i> 添加会员</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">邮箱 <span class="text-danger">*</span></label>
+                    <input type="email" class="form-control form-control-sm" id="add-email" placeholder="会员邮箱（登录账号）">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">用户名 <span class="text-muted small">（选填，默认自动生成序号）</span></label>
+                    <input type="text" class="form-control form-control-sm" id="add-username" placeholder="留空自动生成 001、002...">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">初始密码 <span class="text-danger">*</span></label>
+                    <input type="text" class="form-control form-control-sm" id="add-password" placeholder="不少于 6 位">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">确认密码 <span class="text-danger">*</span></label>
+                    <input type="text" class="form-control form-control-sm" id="add-password2" placeholder="再次输入密码">
+                </div>
+                <div class="row">
+                    <div class="col-6 mb-3">
+                        <label class="form-label">初始余额（元）</label>
+                        <input type="number" class="form-control form-control-sm" id="add-balance" value="0" min="0" step="0.01">
+                    </div>
+                    <div class="col-6 mb-3">
+                        <label class="form-label">会员等级</label>
+                        <select class="form-select form-select-sm" id="add-level"></select>
+                    </div>
+                </div>
+                <div id="add-member-msg" class="small text-danger" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-success btn-sm" onclick="submitAddMember()"><i class="fas fa-check"></i> 确认添加</button>
             </div>
         </div>
     </div>
@@ -337,6 +383,47 @@
             else if (btn.classList.contains('js-del-btn')) deleteMember(id, name);
         });
     })();
+
+    // [新增] 添加会员
+    function openAddMember() {
+        ['add-email', 'add-username', 'add-password', 'add-password2'].forEach(id => document.getElementById(id).value = '');
+        document.getElementById('add-balance').value = '0';
+        const msgEl = document.getElementById('add-member-msg');
+        msgEl.style.display = 'none';
+        msgEl.textContent = '';
+        // 等级下拉（与设置等级弹窗同一套配置）
+        const sel = document.getElementById('add-level');
+        sel.innerHTML = '<option value="0">普通会员</option>';
+        (memberLevelsConfig || []).forEach((lv, i) => {
+            if (!lv) return;
+            sel.innerHTML += `<option value="${i}">${escHtml(lv.name || '等级' + i)}</option>`;
+        });
+        new bootstrap.Modal(document.getElementById('addMemberModal')).show();
+    }
+
+    async function submitAddMember() {
+        const msgEl = document.getElementById('add-member-msg');
+        const email = document.getElementById('add-email').value.trim();
+        const username = document.getElementById('add-username').value.trim();
+        const pwd = document.getElementById('add-password').value;
+        const pwd2 = document.getElementById('add-password2').value;
+        const balance = parseFloat(document.getElementById('add-balance').value) || 0;
+        const level = parseInt(document.getElementById('add-level').value) || 0;
+        const fail = (t) => { msgEl.textContent = t; msgEl.style.display = ''; };
+        if (!email) return fail('请输入邮箱');
+        if (!/^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/.test(email)) return fail('邮箱格式不正确');
+        if (pwd.length < 6) return fail('密码不能少于 6 位');
+        if (pwd.length > 64) return fail('密码不能超过 64 位');
+        if (pwd !== pwd2) return fail('两次输入的密码不一致');
+        if (balance < 0) return fail('初始余额不能为负数');
+        const res = await api('member/add', {
+            method: 'POST',
+            body: JSON.stringify({ email, username, password: pwd, balance, member_level: level })
+        });
+        if (res.error) return fail(res.error);
+        bootstrap.Modal.getInstance(document.getElementById('addMemberModal')).hide();
+        loadMembers();
+    }
 
     // 调整余额
     function openBalance(id, username, balance) {

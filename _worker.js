@@ -11,6 +11,7 @@
  * [修复] 文章管理支持保存封面图、浏览量和显示状态
  * [新增] Outlook (Graph API) 原生发信支持
  * [新增] 客户订单发货通知
+ * [新增] 后台会员管理支持手动添加会员（邮箱/密码/用户名/初始余额/等级）
  */
 
 // === 工具函数 ===
@@ -2151,6 +2152,47 @@ async function handleApi(request, env, url, ctx) {
             }
 
             // === 会员管理 API (Admin) ===
+            // [新增] 添加会员（管理员手动创建）
+            if (path === '/api/admin/member/add' && method === 'POST') {
+                const { username, email, password, balance, member_level } = await request.json();
+                if (!email || !password) return errRes('邮箱和密码不能为空');
+                // [安全加固] 邮箱白名单字符，与注册接口保持一致
+                if (!/^[A-Za-z0-9._%+\-\u4e00-\u9fa5]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/.test(email)) return errRes('请输入有效的邮箱地址');
+                if (password.length < 6) return errRes('密码不能少于6位');
+                if (password.length > 64) return errRes('密码不能超过64位');
+                const initialBalance = parseFloat(balance) || 0;
+                if (initialBalance < 0) return errRes('初始余额不能为负数');
+                const initialLevel = parseInt(member_level) || 0;
+                if (initialLevel < 0) return errRes('等级不能为负数');
+                // 兼容旧数据库: 尝试添加必要字段
+                try { await db.prepare('ALTER TABLE users ADD COLUMN password_encrypted TEXT').run(); } catch(e) {}
+                try { await db.prepare('ALTER TABLE users ADD COLUMN frozen INTEGER DEFAULT 0').run(); } catch(e) {}
+                try { await db.prepare('ALTER TABLE users ADD COLUMN member_level INTEGER DEFAULT 0').run(); } catch(e) {}
+                try { await db.prepare('ALTER TABLE users ADD COLUMN total_recharge REAL DEFAULT 0').run(); } catch(e) {}
+                try { await db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)').run(); } catch(e) {}
+                const existing = await db.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
+                if (existing) return errRes('该邮箱已注册');
+                // 用户名：未填写时自动生成序号（001, 002, 003...），与注册接口逻辑一致
+                let finalUsername = (username || '').trim();
+                if (!finalUsername) {
+                    const maxRow = await db.prepare("SELECT username FROM users WHERE username GLOB '[0-9]*' ORDER BY CAST(username AS INTEGER) DESC LIMIT 1").first();
+                    const nextNum = maxRow ? (parseInt(maxRow.username, 10) || 0) + 1 : 1;
+                    finalUsername = String(nextNum).padStart(3, '0');
+                }
+                const dupName = await db.prepare('SELECT id FROM users WHERE username=?').bind(finalUsername).first();
+                if (dupName) return errRes('用户名已存在');
+                const passwordHash = await hashPassword(password, env);
+                const passwordEncrypted = await encryptPassword(password, env);
+                const now = time();
+                const result = await db.prepare('INSERT INTO users (username, password_hash, password_encrypted, email, balance, frozen, member_level, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)').bind(finalUsername, passwordHash, passwordEncrypted, email, initialBalance, initialLevel, now, now).run();
+                const userId = result.meta.last_row_id;
+                // 初始余额记入流水，便于对账
+                if (initialBalance > 0) {
+                    await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, created_at) VALUES (?, ?, ?, ?, ?)').bind(userId, initialBalance, 'admin_adjust', '管理员添加会员-初始余额', now).run();
+                }
+                return jsonRes({ success: true, user: { id: userId, username: finalUsername, email, balance: initialBalance, member_level: initialLevel } });
+            }
+
             // 会员列表
             if (path === '/api/admin/members/list') {
                 const search = url.searchParams.get('search') || '';
