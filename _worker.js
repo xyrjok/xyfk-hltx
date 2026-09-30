@@ -909,12 +909,57 @@ async function refreshOutlookTokens(db) {
 }
 
 
+// [新增] 会员系统表结构兼容初始化：旧数据库（无会员系统的旧版建库）自动补齐缺失的表和列，全部幂等不报错
+async function ensureMemberTables(db) {
+    try {
+        await db.prepare(`CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT DEFAULT '',
+            password_hash TEXT NOT NULL,
+            password_encrypted TEXT,
+            email TEXT UNIQUE,
+            balance REAL DEFAULT 0,
+            frozen INTEGER DEFAULT 0,
+            member_level INTEGER DEFAULT 0,
+            total_recharge REAL DEFAULT 0,
+            created_at INTEGER,
+            updated_at INTEGER
+        )`).run();
+    } catch(e) {}
+    try {
+        await db.prepare(`CREATE TABLE IF NOT EXISTS balance_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            type TEXT NOT NULL,
+            description TEXT,
+            order_id TEXT,
+            created_at INTEGER
+        )`).run();
+    } catch(e) {}
+    // 兼容旧库缺列
+    for (const ddl of [
+        'ALTER TABLE users ADD COLUMN password_encrypted TEXT',
+        'ALTER TABLE users ADD COLUMN frozen INTEGER DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN member_level INTEGER DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN total_recharge REAL DEFAULT 0',
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)',
+        'ALTER TABLE orders ADD COLUMN user_id INTEGER'
+    ]) {
+        try { await db.prepare(ddl).run(); } catch(e) {}
+    }
+}
+
 async function handleApi(request, env, url, ctx) {
     const method = request.method;
     const path = url.pathname;
     const db = env.xyfk; // 数据库绑定
 
     try {
+        // [新增] 会员相关请求先确保表结构完整（旧库缺表/缺列会导致 500）
+        if (path.startsWith('/api/member') || path.startsWith('/api/admin/member') || path === '/api/admin/members/list') {
+            await ensureMemberTables(db);
+        }
         // ===========================
         // --- 管理员 API (Admin) ---
         // ===========================
@@ -2207,8 +2252,16 @@ async function handleApi(request, env, url, ctx) {
                     params = ['%' + search + '%', '%' + search + '%'];
                 }
                 query += ' ORDER BY u.created_at DESC LIMIT 200';
-                const members = await db.prepare(query).bind(...params).all();
-                return jsonRes({ members: members.results || [] });
+                try {
+                    const members = params.length
+                        ? await db.prepare(query).bind(...params).all()
+                        : await db.prepare(query).all();
+                    return jsonRes({ members: members.results || [] });
+                } catch (e) {
+                    // [新增] 把真实错误返回给后台，便于 F12 直接定位问题
+                    console.error('members/list error:', e);
+                    return errRes('会员列表查询失败: ' + (e.message || e), 500);
+                }
             }
 
             // 会员详情 (含密码、冻结状态、交易记录和订单)
