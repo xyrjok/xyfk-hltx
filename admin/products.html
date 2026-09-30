@@ -113,6 +113,13 @@
 
 
         /* ================== 商品管理专属样式 ================== */
+        /* 移动端：标题与操作按钮分为两行显示（仅 <768px 生效，PC 端不变） */
+        @media (max-width: 767.98px) {
+            .product-toolbar { flex-direction: column; align-items: flex-start !important; }
+            .product-toolbar h3 { margin-bottom: 8px; }
+            .product-toolbar .product-actions { display: flex; flex-wrap: wrap; width: 100%; }
+            .product-toolbar .product-actions .btn { margin-bottom: 8px; }
+        }
         .variant-row { background-color: #f8f9fa; border: 1px solid #e9ecef; }
         .variant-row input::placeholder { color: #cccccc !important; opacity: 1; }
         .form-label-sm { font-size: .75rem; font-weight: 500; color: #555; margin-bottom: 0.1rem; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -174,6 +181,7 @@
                 <li><a href="/admin/products.html" class="active"><i class="fas fa-box"></i> 商品管理</a></li>
                 <li><a href="/admin/cards.html"><i class="fas fa-ticket-alt"></i> 卡密管理</a></li>
                 <li><a href="/admin/orders.html"><i class="fas fa-shopping-cart"></i> 订单管理</a></li>
+                <li><a href="/admin/members.html"><i class="fas fa-users"></i> 会员管理</a></li>
                 <li><a href="/admin/payments.html"><i class="fas fa-credit-card"></i> 支付设置</a></li>
                 <li><a href="/admin/article_categories.html"><i class="fas fa-tags"></i> 文章分类</a></li>
                 <li><a href="/admin/articles.html"><i class="fas fa-newspaper"></i> 文章管理</a></li>
@@ -187,9 +195,15 @@
     </div>
 
     <div class="admin-content">
-        <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="d-flex justify-content-between align-items-center mb-3 product-toolbar">
             <h3>商品管理</h3>
-            <div>
+            <div class="product-actions">
+                <button class="btn btn-outline-secondary btn-sm me-2" id="export-products-btn" onclick="exportProducts()" title="导出全部商品数据（含分类与规格，不含卡密）">
+                    <i class="fas fa-file-export"></i> 导出商品
+                </button>
+                <button class="btn btn-outline-success btn-sm me-2" onclick="openImportModal()" title="导入商品数据（不含卡密），缺失的分类自动创建">
+                    <i class="fas fa-file-import"></i> 导入商品
+                </button>
                 <button class="btn btn-danger btn-sm me-2" id="batch-delete-btn" onclick="batchDelete()" style="display: none;">
                     <i class="fas fa-trash"></i> 批量删除 <span id="selected-count" class="badge bg-light text-dark rounded-pill ms-1">0</span>
                 </button>
@@ -307,6 +321,39 @@
         </div>
     </div>
 </div>
+<div class="modal fade" id="importModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">导入商品</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info py-2 small mb-3">
+                    <i class="fas fa-info-circle"></i>
+                    仅导入 <b>商品分类 / 商品 / 规格</b>，<b class="text-danger">不包含卡密</b>；卡密请在【卡密管理】中单独导入。<br>
+                    文件中的商品分类若在本系统不存在，会<b>自动新建分类</b>并自动关联到对应商品。
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">选择商品文件 (.json)</label>
+                    <input type="file" class="form-control" id="import-file" accept=".json,application/json" onchange="previewImportFile()">
+                    <div class="form-text" id="import-preview">请使用本系统【导出商品】生成的 JSON 文件。</div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">同名商品处理方式</label>
+                    <select class="form-select" id="import-mode">
+                        <option value="skip" selected>跳过（推荐，避免重复导入）</option>
+                        <option value="insert">仍然新建（会产生同名商品）</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary btn-sm" onclick="importProducts()">开始导入</button>
+            </div>
+        </div>
+    </div>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
     // 权限与配置
@@ -388,11 +435,18 @@
         if (ids.length === 0) return;
         if (!confirm(`确定要删除选中的 ${ids.length} 个商品吗？\n警告：删除商品将同时删除其下所有规格和卡密！`)) return;
         const btn = document.getElementById('batch-delete-btn');
+        const originalHtml = btn.innerHTML;
         btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 删除中...';
         try {
-            await Promise.all(ids.map(id => api('product/delete', { method: 'POST', body: JSON.stringify({ id: id }) })));
-            alert('批量删除已完成'); loadData();
-        } catch (error) { alert('部分删除可能失败'); loadData(); } finally { btn.disabled = false; }
+            const res = await api('product/delete', { method: 'POST', body: JSON.stringify({ ids: ids }) });
+            if (res && res.success) {
+                alert(`已删除 ${res.deleted} 个商品及其下所有规格与卡密`);
+            } else {
+                alert('删除失败: ' + ((res && res.error) || '未知错误'));
+            }
+            loadData();
+        } catch (error) { alert('删除可能失败: ' + (error.message || '未知错误')); loadData(); }
+        finally { btn.disabled = false; btn.innerHTML = originalHtml; }
     }
     
     // 单个删除
@@ -587,6 +641,105 @@
             }
         });
     }
+    // ===== 商品导出 / 导入 =====
+    const importModal = new bootstrap.Modal(document.getElementById('importModal'));
+    function openImportModal() {
+        document.getElementById('import-file').value = '';
+        document.getElementById('import-preview').innerText = '请使用本系统【导出商品】生成的 JSON 文件。';
+        document.getElementById('import-mode').value = 'skip';
+        importModal.show();
+    }
+
+    // 导出全部商品数据（不含卡密）
+    async function exportProducts() {
+        const btn = document.getElementById('export-products-btn');
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 生成中...';
+        try {
+            const res = await fetch('/api/admin/products/export', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            if (res.status !== 200) {
+                let msg = '导出失败';
+                try { msg = (await res.json()).error || msg; } catch (e) {}
+                throw new Error(msg);
+            }
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `products_export_${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+        } catch (e) {
+            alert('导出失败: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+        }
+    }
+
+    // 选择文件后预览导入内容
+    async function previewImportFile() {
+        const fileInput = document.getElementById('import-file');
+        const tip = document.getElementById('import-preview');
+        if (!fileInput.files || fileInput.files.length === 0) {
+            tip.innerText = '请使用本系统【导出商品】生成的 JSON 文件。';
+            return;
+        }
+        try {
+            const data = JSON.parse(await fileInput.files[0].text());
+            if (!data || !Array.isArray(data.products)) throw new Error('缺少商品数据');
+            const vCount = data.products.reduce((n, p) => n + (Array.isArray(p.variants) ? p.variants.length : 0), 0);
+            const cCount = (Array.isArray(data.categories) ? data.categories.length : 0);
+            tip.innerHTML = `已解析：商品 <b>${data.products.length}</b> 个、规格 <b>${vCount}</b> 个、分类 <b>${cCount}</b> 个` + (data.includes_cards ? '，<span class="text-danger">该文件包含卡密，请勿使用</span>' : '，不含卡密');
+        } catch (e) {
+            tip.innerHTML = '<span class="text-danger">文件解析失败，请选择本系统【导出商品】生成的 JSON 文件。</span>';
+        }
+    }
+
+    // 导入商品（自动创建缺失分类；不导入卡密）
+    async function importProducts() {
+        const fileInput = document.getElementById('import-file');
+        if (!fileInput.files || fileInput.files.length === 0) return alert('请先选择商品文件');
+        let data;
+        try {
+            data = JSON.parse(await fileInput.files[0].text());
+        } catch (e) {
+            return alert('文件解析失败，请选择本系统【导出商品】生成的 JSON 文件');
+        }
+        if (!data || !Array.isArray(data.products)) return alert('文件格式不正确：缺少商品数据');
+        const mode = document.getElementById('import-mode').value;
+        const btn = document.querySelector('#importModal .btn-primary');
+        const originalText = btn.innerText;
+        btn.disabled = true;
+        btn.innerText = '导入中...';
+        try {
+            const res = await api('products/import', { method: 'POST', body: JSON.stringify({ data: data, mode: mode }) });
+            if (!res || res.error) return alert('导入失败: ' + ((res && res.error) || '未知错误'));
+            let msg = `导入完成！\n新增商品：${res.imported} 个\n新增规格：${res.variants} 个`;
+            if (res.created_categories && res.created_categories.length > 0) {
+                msg += `\n自动新建分类 ${res.created_categories.length} 个：${res.created_categories.join('、')}`;
+            }
+            if (res.skipped && res.skipped.length > 0) {
+                msg += `\n跳过同名商品 ${res.skipped.length} 个：${res.skipped.slice(0, 10).join('、')}${res.skipped.length > 10 ? ' 等' : ''}`;
+            }
+            alert(msg);
+            importModal.hide();
+            loadData();
+        } catch (e) {
+            alert('导入失败: ' + (e.message || '未知错误'));
+        } finally {
+            btn.disabled = false;
+            btn.innerText = originalText;
+        }
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         const imgInput = document.getElementById('p-image');
         const btn = document.createElement('button');

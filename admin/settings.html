@@ -121,6 +121,7 @@
                 <li><a href="/admin/products.html"><i class="fas fa-box"></i> 商品管理</a></li>
                 <li><a href="/admin/cards.html"><i class="fas fa-ticket-alt"></i> 卡密管理</a></li>
                 <li><a href="/admin/orders.html"><i class="fas fa-shopping-cart"></i> 订单管理</a></li>
+                <li><a href="/admin/members.html"><i class="fas fa-users"></i> 会员管理</a></li>
                 <li><a href="/admin/payments.html"><i class="fas fa-credit-card"></i> 支付设置</a></li>
                 <li><a href="/admin/article_categories.html"><i class="fas fa-tags"></i> 文章分类</a></li>
                 <li><a href="/admin/articles.html"><i class="fas fa-newspaper"></i> 文章管理</a></li>
@@ -147,13 +148,16 @@
                                 <button class="nav-link active" id="basic-tab" data-bs-toggle="tab" data-bs-target="#basic" type="button">基本设置</button>
                             </li>
                             <li class="nav-item">
+                                <button class="nav-link" id="member-tab" data-bs-toggle="tab" data-bs-target="#member-settings" type="button">会员设置</button>
+                            </li>
+                            <li class="nav-item">
                                 <button class="nav-link" id="notify-tab" data-bs-toggle="tab" data-bs-target="#notify" type="button">管理员订单推送</button>
                             </li>
                             <li class="nav-item">
                                 <button class="nav-link" id="customer-notify-tab" data-bs-toggle="tab" data-bs-target="#customer-notify" type="button">客户订单推送</button>
                             </li> 
                             <li class="nav-item">
-                                <button class="nav-link" id="github-tab" data-bs-toggle="tab" data-bs-target="#github" type="button">图床设置</button>
+                                <button class="nav-link" id="imagebed-tab" data-bs-toggle="tab" data-bs-target="#imagebed" type="button">图床设置</button>
                             </li>
                         </ul>
                     </div>
@@ -170,6 +174,11 @@
                                             <span class="ms-2 small">前台显示</span>
                                         </div>
                                     </div>
+		                            </div>
+		                            <div class="col-md-6 mb-3">
+		                                <label class="form-label">支付宝订单标题前缀</label>
+		                                <input type="text" class="form-control" id="order_prefix" placeholder="留空则显示为：订单号：xxx">
+		                                <div class="form-text text-muted" style="font-size: 12px;">填入后普通订单显示为「前缀订单号：xxx」，购物车合并订单显示为「前缀购物车合并订单」。</div>
 		                            </div>
 		                            <div class="col-md-6 mb-3">
 		                                <label class="form-label">网站 Logo (图片 URL)</label>
@@ -246,6 +255,7 @@
                                         <option value="TBshop">仿淘宝 (TBshop)</option>
                                     </select>
                                 </div>
+
                                 <div class="mb-3">
                                     <label class="form-label">默认公告 (将被文章公告覆盖)</label>
                                     <textarea class="form-control" id="announce" rows="3" placeholder="请输入店铺公告..."></textarea>
@@ -264,6 +274,28 @@
                                     <textarea class="form-control" id="custom_js" rows="3" placeholder='例如：<script src="https://xxx.xxx/widget.js"></script>'></textarea>
                                     <div class="form-text text-muted" style="font-size: 12px;">此处填写的代码将自动加载到前台页面，可用于添加客服插件或统计代码。</div>
                                 </div>
+                            </div>
+
+                            <div class="tab-pane fade" id="member-settings" role="tabpanel">
+                                <div class="mb-3 form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="member_enabled">
+                                    <label class="form-check-label fw-bold" for="member_enabled">开启会员系统</label>
+                                    <div class="form-text text-muted">开启后，开放前台注册，注册用户自动成为会员并享受等级折扣。关闭后前台<b>禁止新注册</b>（已注册会员仍可正常登录、使用余额），且所有用户按原价购买。</div>
+                                </div>
+                                
+                                <h6 class="mb-3 border-bottom pb-2 mt-4"><i class="fas fa-crown text-warning"></i> 会员等级与折扣</h6>
+                                <div id="member-levels-list">
+                                    <!-- 动态生成 -->
+                                </div>
+                                <button class="btn btn-outline-success btn-sm mt-2" onclick="addMemberLevel()"><i class="fas fa-plus"></i> 添加等级</button>
+                                <div class="form-text text-muted mt-2">折扣值范围 1-99，如填 95 表示 95 折（5% 优惠）。等级按从上到下排列，序号越大等级越高。</div>
+                                
+                                <h6 class="mb-3 border-bottom pb-2 mt-4"><i class="fas fa-arrow-up text-info"></i> 充值自动升级规则</h6>
+                                <div id="member-upgrades-list">
+                                    <!-- 动态生成 -->
+                                </div>
+                                <button class="btn btn-outline-success btn-sm mt-2" onclick="addUpgradeRule()"><i class="fas fa-plus"></i> 添加升级规则</button>
+                                <div class="form-text text-muted mt-2">当会员累计充值金额达到设定值时，自动升级到对应等级。升级为单向（只升不降）。</div>
                             </div>
 
                             <div class="tab-pane fade" id="notify" role="tabpanel">
@@ -285,10 +317,16 @@
                                 <div class="mb-3">
                                     <label class="form-label">接收通知的邮箱</label>
                                     <input type="email" class="form-control" id="mail_to" placeholder="例如：123456@qq.com">
-                                    <div class="form-text text-muted" style="font-size: 12px;">Brevo 和 Outlook 都会发送到这个邮箱。</div>
+                                    <div class="form-text text-muted" style="font-size: 12px;">Outlook 通知会发送到这个邮箱。</div>
                                 </div>
 
                                 <h6 class="mb-3 border-bottom pb-2 mt-4"><i class="fab fa-microsoft text-primary"></i> Outlook (Graph API)</h6>
+                                <div class="alert alert-info py-2 small mb-3">
+                                    <i class="fas fa-info-circle"></i> <strong>支持两种认证模式：</strong><br>
+                                    <strong>模式一（机密客户端）：</strong>适用于 Azure 后台创建的「Web」类型应用，需填写 Client ID + Client Secret + Refresh Token 三项。<br>
+                                    <strong>模式二（公共客户端）：</strong>适用于「移动和桌面应用程序」类型应用（或已开启「允许公共客户端流」的 Web 应用），仅需 Client ID + Refresh Token 两项，Client Secret 留空即可。<br>
+                                    两种模式均需在 Azure 后台为应用授予 <code>Mail.Send</code>（应用权限或委托权限）和 <code>offline_access</code> 权限，并由管理员完成授权同意。
+                                </div>
                                 <div class="mb-3 form-check form-switch">
                                     <input class="form-check-input" type="checkbox" id="outlook_active">
                                     <label class="form-check-label" for="outlook_active">开启 Outlook 原生发信</label>
@@ -298,34 +336,34 @@
                                     <input type="text" class="form-control" id="outlook_client_id" placeholder="Azure 后台获取">
                                 </div>
                                 <div class="mb-3">
-                                    <label class="form-label">Client Secret (客户端密码)</label>
-                                    <input type="text" class="form-control" id="outlook_client_secret" placeholder="Azure 后台获取">
+                                    <label class="form-label">Client Secret (客户端密码) <span class="badge bg-secondary">选填</span></label>
+                                    <input type="text" class="form-control" id="outlook_client_secret" placeholder="机密客户端填此项，公共客户端留空">
+                                    <div class="form-text text-muted" style="font-size: 12px;">机密客户端模式必须填写；公共客户端模式（无 Secret）留空即可，系统会自动适配。</div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label">Refresh Token (刷新令牌)</label>
                                     <input type="text" class="form-control" id="outlook_refresh_token" placeholder="需手动获取长效 Refresh Token">
-                                    <div class="form-text text-muted" style="font-size: 12px;">请确保该 Token 拥有 Mail.Send 和 offline_access 权限。</div>
+                                    <div class="form-text text-muted" style="font-size: 12px;">请确保该 Token 拥有 Mail.Send 和 offline_access 权限。公共客户端模式下 Refresh Token 不会自动轮换，过期后需手动重新获取。</div>
+                                </div>
+                                <div class="mt-3 mb-3">
+                                    <button class="btn btn-outline-primary" type="button" id="admin_outlook_test_btn" onclick="testOutlook('admin')">
+                                        <i class="fas fa-paper-plane"></i> 发送测试邮件
+                                    </button>
+                                    <span id="admin_outlook_test_result" class="ms-2 small"></span>
                                 </div>
                                 
-                                <h6 class="mb-3 border-bottom pb-2 mt-4"><i class="fas fa-paper-plane text-success"></i> Brevo (原 Sendinblue)</h6>
-                                <div class="mb-3 form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="brevo_active">
-                                    <label class="form-check-label" for="brevo_active">开启 Brevo 邮件推送</label>
-                                </div>
-                                <div class="mb-3">
-                                    <label class="form-label">API Key (v3)</label>
-                                    <input type="text" class="form-control" id="brevo_key" placeholder="xkeysib-...">
-                                </div>
-                                <div class="mb-3">
-                                    <label class="form-label">发件人邮箱 (Sender Email)</label>
-                                    <input type="email" class="form-control" id="brevo_sender" placeholder="需在 Brevo 后台验证过的发件人">
-                                </div>
                             </div>
 
                             <div class="tab-pane fade" id="customer-notify" role="tabpanel">
                                 <p class="text-muted">当客户在下单时填写了邮箱地址，并且订单发货成功时，系统将通过以下配置自动发送发货通知邮件（包含卡密）。</p>
                                 
                                 <h6 class="mb-3 border-bottom pb-2 mt-4"><i class="fab fa-microsoft text-primary"></i> Outlook (Graph API)</h6>
+                                <div class="alert alert-info py-2 small mb-3">
+                                    <i class="fas fa-info-circle"></i> <strong>支持两种认证模式（同管理员推送）：</strong><br>
+                                    <strong>模式一（机密客户端）：</strong>Client ID + Client Secret + Refresh Token 三项全填。<br>
+                                    <strong>模式二（公共客户端）：</strong>仅填 Client ID + Refresh Token，Client Secret 留空。<br>
+                                    建议使用独立的发信邮箱账户，避免与管理员推送共用同一应用和令牌。
+                                </div>
                                 <div class="mb-3 form-check form-switch">
                                     <input class="form-check-input" type="checkbox" id="customer_outlook_active">
                                     <label class="form-check-label" for="customer_outlook_active">开启 Outlook 客户发信</label>
@@ -335,57 +373,54 @@
                                     <input type="text" class="form-control" id="customer_outlook_client_id" placeholder="Azure 后台获取">
                                 </div>
                                 <div class="mb-3">
-                                    <label class="form-label">Client Secret (客户端密码)</label>
-                                    <input type="text" class="form-control" id="customer_outlook_client_secret" placeholder="Azure 后台获取">
+                                    <label class="form-label">Client Secret (客户端密码) <span class="badge bg-secondary">选填</span></label>
+                                    <input type="text" class="form-control" id="customer_outlook_client_secret" placeholder="机密客户端填此项，公共客户端留空">
+                                    <div class="form-text text-muted" style="font-size: 12px;">机密客户端模式必须填写；公共客户端模式（无 Secret）留空即可，系统会自动适配。</div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label">Refresh Token (刷新令牌)</label>
                                     <input type="text" class="form-control" id="customer_outlook_refresh_token" placeholder="需手动获取长效 Refresh Token">
-                                    <div class="form-text text-muted" style="font-size: 12px;">建议单独使用一个邮箱账户，确保该 Token 拥有 Mail.Send 和 offline_access 权限。</div>
+                                    <div class="form-text text-muted" style="font-size: 12px;">建议单独使用一个邮箱账户，确保该 Token 拥有 Mail.Send 和 offline_access 权限。公共客户端模式下 Refresh Token 不会自动轮换，过期后需手动重新获取。</div>
+                                </div>
+                                <div class="mt-3 mb-3">
+                                    <label class="form-label">测试收件邮箱</label>
+                                    <div class="input-group">
+                                        <input type="email" class="form-control" id="customer_outlook_test_email" placeholder="输入一个邮箱地址接收测试邮件">
+                                        <button class="btn btn-outline-primary" type="button" id="customer_outlook_test_btn" onclick="testOutlook('customer')">
+                                            <i class="fas fa-paper-plane"></i> 发送测试邮件
+                                        </button>
+                                    </div>
+                                    <span id="customer_outlook_test_result" class="small"></span>
                                 </div>
                             </div>
-							<div class="tab-pane fade" id="github" role="tabpanel">
+							<div class="tab-pane fade" id="imagebed" role="tabpanel">
                                 <div class="alert alert-info py-2 small">
-                                    <i class="fas fa-info-circle"></i> 配置 GitHub 仓库作为免费图床。配置完成后，可在商品/文章编辑时直接上传图片。
+                                    <i class="fas fa-info-circle"></i> 配置图床服务后，可在商品/文章编辑时直接上传图片。支持 Telegram 图床和通用外部图床 API。
                                 </div>
 								<h6 class="mb-3 border-bottom pb-2 mt-4"><i class="fas fa-toggle-on text-success"></i> 全局上传节点选择</h6>
                                 <div class="mb-3">
                                     <label class="form-label fw-bold">当前默认使用的图床</label>
                                     <select class="form-select border-primary" id="default_upload_provider" style="background-color: #f8faff;">
-                                        <option value="github">GitHub 代理图床</option>
+                                        <option value="r2">Cloudflare R2 对象存储</option>
                                         <option value="custom">通用外部图床 API</option>
 										<option value="telegram">Telegram 官方图床</option>
                                     </select>
                                     <div class="form-text text-muted">全站所有图片上传（商品图、文章图、图片管理）将自动使用此处选择的接口。</div>
                                 </div>
                                 <hr class="my-4">
-                                <div class="mb-3">
-                                    <label class="form-label"><i class="fab fa-github"></i> GitHub 用户名 (User)</label>
-                                    <input type="text" class="form-control" id="gh_user" placeholder="例如：xyrjok">
+								<h6 class="mb-3 border-bottom pb-2 mt-4"><i class="fas fa-cloud text-warning"></i> Cloudflare R2 对象存储</h6>
+                                <div class="alert alert-warning py-2 small">
+                                    <i class="fas fa-exclamation-triangle"></i> 使用前请先在 Cloudflare Pages 项目的 <strong>Settings &rarr; Functions &rarr; R2 bucket bindings</strong> 中添加绑定：<br>
+                                    &nbsp;&nbsp;Variable name: <code>r2</code>，R2 bucket: 选择你创建的 Bucket。<br>
+                                    &nbsp;&nbsp;同时请在 R2 Bucket 的 <strong>设置 &rarr; 公开访问</strong> 中开启公开访问，或绑定自定义域名。
                                 </div>
-                                
                                 <div class="mb-3">
-                                    <label class="form-label">仓库名称 (Repo)</label>
-                                    <input type="text" class="form-control" id="gh_repo" placeholder="例如：my-images">
-                                    <div class="form-text text-muted" style="font-size: 12px;">支持 <b>Private (私有)</b> 仓库。图片将通过本站后端代理访问，安全且无需公开仓库。</div>
-                                </div>
-
-                                <div class="mb-3">
-                                    <label class="form-label">Personal Access Token (Classic)</label>
+                                    <label class="form-label">R2 公开访问域名 (选填)</label>
                                     <div class="input-group">
-                                        <input type="password" class="form-control" id="gh_token" placeholder="ghp_xxxxxxxxxxxx...">
-                                        <button class="btn btn-outline-secondary" type="button" onclick="togglePass('gh_token')"><i class="fas fa-eye"></i></button>
+                                        <span class="input-group-text">https://</span>
+                                        <input type="text" class="form-control" id="r2_public_domain" placeholder="例如：pub-xxx.r2.dev 或 img.yourdomain.com">
                                     </div>
-                                    <div class="form-text text-muted" style="font-size: 12px;">
-                                        需要去 GitHub Settings -> Developer settings -> Personal access tokens (Classic) 生成。<br>
-                                        <b>权限要求：</b> 必须勾选 <code>repo</code> (Full control of private repositories) 权限。
-                                    </div>
-                                </div>
-
-                                <div class="mb-3">
-                                    <label class="form-label">图片访问方式</label>
-                                    <input type="text" class="form-control" value="本站代理 /gh_image/ (自动适配域名)" disabled readonly>
-                                    <div class="form-text text-muted">已启用后端代理模式，图片链接将自动生成为 /gh_image/xxx 格式，无需配置 CDN。</div>
+                                    <div class="form-text text-muted">如果已绑定自定义域名或开启了 r2.dev 公开访问，请填写域名部分（不带 https://）。留空则使用内置代理路由 /r2_image/ 访问图片。</div>
                                 </div>
 								<h6 class="mb-3 border-bottom pb-2 mt-4"><i class="fab fa-telegram text-primary"></i> Telegram 图床</h6>
                                 <div class="mb-3">
@@ -469,6 +504,7 @@
             const config = await api('settings/get');
             
             document.getElementById('site_name').value = config.site_name || '';
+            document.getElementById('order_prefix').value = config.order_prefix || '';
             document.getElementById('site_logo').value = config.site_logo || '';
             document.getElementById('show_site_name').checked = (config.show_site_name === '1');
             document.getElementById('show_site_logo').checked = (config.show_site_logo === '1');
@@ -500,26 +536,24 @@
             document.getElementById('outlook_client_secret').value = config.outlook_client_secret || '';
             document.getElementById('outlook_refresh_token').value = config.outlook_refresh_token || '';
             
-            // --- Brevo 回显 (管理员) ---
-            document.getElementById('brevo_active').checked = (config.brevo_active === '1');
-            document.getElementById('brevo_key').value = config.brevo_key || '';
-            document.getElementById('brevo_sender').value = config.brevo_sender || '';
-            
             // --- [新增] 客户 Outlook 回显 ---
             document.getElementById('customer_outlook_active').checked = (config.customer_outlook_active === '1');
             document.getElementById('customer_outlook_client_id').value = config.customer_outlook_client_id || '';
             document.getElementById('customer_outlook_client_secret').value = config.customer_outlook_client_secret || '';
             document.getElementById('customer_outlook_refresh_token').value = config.customer_outlook_refresh_token || '';
-			// --- [新增] GitHub 图床回显 ---
-            document.getElementById('gh_user').value = config.gh_user || '';
-            document.getElementById('gh_repo').value = config.gh_repo || '';
-            document.getElementById('gh_token').value = config.gh_token || '';
-			document.getElementById('default_upload_provider').value = config.default_upload_provider || 'custom';
+			// --- [新增] 图床回显 ---
+			document.getElementById('default_upload_provider').value = config.default_upload_provider || 'r2';
+			document.getElementById('r2_public_domain').value = config.r2_public_domain || '';
 			document.getElementById('tg_upload_bot_token').value = config.tg_upload_bot_token || '';
             document.getElementById('tg_upload_chat_id').value = config.tg_upload_chat_id || '';
             document.getElementById('custom_api_url').value = config.custom_api_url || '';
             document.getElementById('custom_api_token').value = config.custom_api_token || '';
             document.getElementById('custom_api_field').value = config.custom_api_field || '';
+            document.getElementById('member_enabled').checked = (config.member_enabled === '1');
+            try { memberLevelsData = JSON.parse(config.member_levels || '[]'); } catch(e) { memberLevelsData = []; }
+            try { upgradeRulesData = JSON.parse(config.member_upgrade_rules || '[]'); } catch(e) { upgradeRulesData = []; }
+            renderMemberLevels();
+            renderUpgradeRules();
             // Power Automate 已删除
             // document.getElementById('pa_active').checked = (config.pa_active === '1');
             // document.getElementById('pa_url').value = config.pa_url || '';
@@ -533,6 +567,7 @@
     async function saveSettings() {
         const data = {
             site_name: document.getElementById('site_name').value,
+            order_prefix: document.getElementById('order_prefix').value.trim(),
             site_logo: document.getElementById('site_logo').value,
             show_site_name: document.getElementById('show_site_name').checked ? '1' : '0',
             show_site_logo: document.getElementById('show_site_logo').checked ? '1' : '0',
@@ -549,6 +584,9 @@
             admin_turnstile_active: document.getElementById('admin_turnstile_active').checked ? '1' : '0',
             turnstile_site_key: document.getElementById('turnstile_site_key').value.trim(),
             turnstile_secret_key: document.getElementById('turnstile_secret_key').value.trim(),
+			member_enabled: document.getElementById('member_enabled').checked ? '1' : '0',
+            member_levels: JSON.stringify(memberLevelsData),
+            member_upgrade_rules: JSON.stringify(upgradeRulesData),
 			custom_js: document.getElementById('custom_js').value,
             
             // --- 订单推送设置保存 (管理员) ---
@@ -564,25 +602,14 @@
             outlook_client_secret: document.getElementById('outlook_client_secret').value,
             outlook_refresh_token: document.getElementById('outlook_refresh_token').value,
 
-            // --- Brevo 保存 (管理员) ---
-            brevo_active: document.getElementById('brevo_active').checked ? '1' : '0',
-            brevo_key: document.getElementById('brevo_key').value,
-            brevo_sender: document.getElementById('brevo_sender').value,
-            
-            // Power Automate 已删除
-            // pa_active: document.getElementById('pa_active').checked ? '1' : '0',
-            // pa_url: document.getElementById('pa_url').value,
-
             // --- [新增] 客户 Outlook 保存 ---
             customer_outlook_active: document.getElementById('customer_outlook_active').checked ? '1' : '0',
             customer_outlook_client_id: document.getElementById('customer_outlook_client_id').value,
             customer_outlook_client_secret: document.getElementById('customer_outlook_client_secret').value,
             customer_outlook_refresh_token: document.getElementById('customer_outlook_refresh_token').value,
-			// --- [新增] GitHub 图床保存 ---
+			// --- [新增] 图床保存 ---
 			default_upload_provider: document.getElementById('default_upload_provider').value,
-            gh_user: document.getElementById('gh_user').value.trim(),
-            gh_repo: document.getElementById('gh_repo').value.trim(),
-            gh_token: document.getElementById('gh_token').value.trim(),
+			r2_public_domain: document.getElementById('r2_public_domain').value.trim(),
 			tg_upload_bot_token: document.getElementById('tg_upload_bot_token').value.trim(),
             tg_upload_chat_id: document.getElementById('tg_upload_chat_id').value.trim(),
 			custom_api_url: document.getElementById('custom_api_url').value.trim(),
@@ -596,6 +623,65 @@
             alert('保存失败: ' + (res.error || '未知错误'));
         }
     }
+// [新增] Outlook 发信测试
+    async function testOutlook(mode) {
+        const btnId = mode === 'admin' ? 'admin_outlook_test_btn' : 'customer_outlook_test_btn';
+        const resultId = mode === 'admin' ? 'admin_outlook_test_result' : 'customer_outlook_test_result';
+        const btn = document.getElementById(btnId);
+        const resultSpan = document.getElementById(resultId);
+
+        const clientId = document.getElementById(`${mode === 'admin' ? '' : 'customer_'}outlook_client_id`).value.trim();
+        const clientSecret = document.getElementById(`${mode === 'admin' ? '' : 'customer_'}outlook_client_secret`).value.trim();
+        const refreshToken = document.getElementById(`${mode === 'admin' ? '' : 'customer_'}outlook_refresh_token`).value.trim();
+
+        // 收件邮箱：管理员用 mail_to，客户用用户填写的测试邮箱
+        let toEmail = '';
+        if (mode === 'admin') {
+            toEmail = document.getElementById('mail_to').value.trim();
+            if (!toEmail) {
+                resultSpan.innerHTML = '<span class="text-danger"><i class="fas fa-times-circle"></i> 请先填写「接收通知的邮箱」</span>';
+                return;
+            }
+        } else {
+            toEmail = document.getElementById('customer_outlook_test_email').value.trim();
+            if (!toEmail) {
+                resultSpan.innerHTML = '<span class="text-danger"><i class="fas fa-times-circle"></i> 请填写测试收件邮箱</span>';
+                return;
+            }
+        }
+
+        if (!clientId || !refreshToken) {
+            resultSpan.innerHTML = '<span class="text-danger"><i class="fas fa-times-circle"></i> 请填写 Client ID 和 Refresh Token</span>';
+            return;
+        }
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 测试中...';
+        resultSpan.innerHTML = '<span class="text-muted">正在连接 Outlook Graph API...</span>';
+
+        try {
+            const res = await api('outlook/test', {
+                method: 'POST',
+                body: JSON.stringify({
+                    client_id: clientId,
+                    client_secret: clientSecret,
+                    refresh_token: refreshToken,
+                    to_email: toEmail
+                })
+            });
+            if (res.success) {
+                resultSpan.innerHTML = `<span class="text-success"><i class="fas fa-check-circle"></i> ${res.message || '发送成功！'}</span>`;
+            } else {
+                resultSpan.innerHTML = `<span class="text-danger"><i class="fas fa-times-circle"></i> ${res.error || '测试失败'}</span>`;
+            }
+        } catch (e) {
+            resultSpan.innerHTML = `<span class="text-danger"><i class="fas fa-times-circle"></i> 请求异常: ${e.message}</span>`;
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-paper-plane"></i> 发送测试邮件';
+        }
+    }
+
 // [新增] 切换密码框显示状态
     function togglePass(id) {
         const input = document.getElementById(id);
@@ -610,6 +696,48 @@
             icon.classList.add('fa-eye');
         }
     }
+
+    // === 会员设置动态管理 ===
+    let memberLevelsData = [];
+    let upgradeRulesData = [];
+
+    function renderMemberLevels() {
+        const container = document.getElementById('member-levels-list');
+        if (memberLevelsData.length === 0) {
+            container.innerHTML = '<p class="text-muted small">暂无等级配置，点击下方按钮添加。</p>';
+            return;
+        }
+        container.innerHTML = memberLevelsData.map((lv, i) => `
+            <div class="row g-2 mb-2 align-items-center" data-index="${i}">
+                <div class="col-1 text-center"><span class="badge bg-secondary">${i + 1}</span></div>
+                <div class="col-4"><input type="text" class="form-control form-control-sm" value="${lv.name || ''}" placeholder="等级名称，如 VIP1" onchange="memberLevelsData[${i}].name=this.value"></div>
+                <div class="col-4"><div class="input-group input-group-sm"><input type="number" class="form-control" min="1" max="99" value="${lv.discount || 100}" placeholder="折扣" onchange="memberLevelsData[${i}].discount=parseInt(this.value)||100"><span class="input-group-text">折</span></div></div>
+                <div class="col-3 text-end"><button class="btn btn-outline-danger btn-sm" onclick="removeMemberLevel(${i})"><i class="fas fa-trash"></i></button></div>
+            </div>
+        `).join('');
+    }
+    function addMemberLevel() { memberLevelsData.push({ name: '', discount: 100 }); renderMemberLevels(); }
+    function removeMemberLevel(index) { memberLevelsData.splice(index, 1); renderMemberLevels(); renderUpgradeRules(); }
+
+    function renderUpgradeRules() {
+        const container = document.getElementById('member-upgrades-list');
+        if (upgradeRulesData.length === 0) {
+            container.innerHTML = '<p class="text-muted small">暂无升级规则，点击下方按钮添加。</p>';
+            return;
+        }
+        container.innerHTML = upgradeRulesData.map((rule, i) => `
+            <div class="row g-2 mb-2 align-items-center" data-index="${i}">
+                <div class="col-1 text-center"><i class="fas fa-exchange-alt text-muted"></i></div>
+                <div class="col-4"><div class="input-group input-group-sm"><input type="number" class="form-control" min="0" step="0.01" value="${rule.amount || ''}" placeholder="充值金额" onchange="upgradeRulesData[${i}].amount=parseFloat(this.value)||0"><span class="input-group-text">元</span></div></div>
+                <div class="col-1 text-center"><i class="fas fa-arrow-right text-muted"></i></div>
+                <div class="col-3"><select class="form-select form-select-sm" onchange="upgradeRulesData[${i}].level=parseInt(this.value)"><option value="">选择等级</option>${memberLevelsData.map((lv, li) => `<option value="${li}" ${rule.level === li ? 'selected' : ''}>${lv.name || '等级' + (li + 1)}</option>`).join('')}</select></div>
+                <div class="col-3 text-end"><button class="btn btn-outline-danger btn-sm" onclick="removeUpgradeRule(${i})"><i class="fas fa-trash"></i></button></div>
+            </div>
+        `).join('');
+    }
+    function addUpgradeRule() { upgradeRulesData.push({ amount: 0, level: '' }); renderUpgradeRules(); }
+    function removeUpgradeRule(index) { upgradeRulesData.splice(index, 1); renderUpgradeRules(); }
+
 	// [新增] 唤起图片上传并填充输入框
     function uploadImage(inputId) {
         const fileInput = document.createElement('input');

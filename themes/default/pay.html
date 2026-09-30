@@ -84,6 +84,21 @@
                             <div class="col-12 text-muted">加载支付方式...</div>
                         </div>
 
+
+                        <!-- 会员余额支付选项 -->
+                        <div id="balance-pay-section" style="display:none;" class="mb-4">
+                            <h6 class="mb-3"><i class="fas fa-wallet text-primary me-2"></i>会员快捷支付</h6>
+                            <div class="pay-method-item" style="cursor:pointer; border-color: #0d6efd; background: #f0f8ff;" onclick="balancePayCurrentOrder()">
+                                <i class="fas fa-wallet text-primary fa-2x me-3"></i>
+                                <div>
+                                    <div class="fw-bold">余额支付</div>
+                                    <small class="text-muted">当前余额：<span id="pay-balance-amount">--</span> 元</small>
+                                </div>
+                                <i class="fa fa-chevron-right text-muted ms-auto"></i>
+                            </div>
+                            <div id="balance-pay-error" class="text-danger small mt-2" style="display:none;"></div>
+                        </div>
+
                         <div id="qr-code-section" class="text-center pt-3">
 
                             <div id="countdown-box" class="mb-4" style="display:none;">
@@ -260,6 +275,25 @@
                     startPolling();
                 }
 
+                // ====== 易支付 / 跳转类支付 ======
+                if (data.type === 'redirect' && data.pay_url) {
+                    qrContainer.innerHTML = `
+                        <div class="d-flex flex-column align-items-center justify-content-center h-100">
+                            <i class="fas fa-external-link-alt text-primary fa-3x mb-3"></i>
+                            <span class="fw-bold mb-2">即将跳转到支付页面...</span>
+                            <a href="${data.pay_url}" class="btn btn-primary rounded-pill px-4 mt-2" id="yipay-redirect-btn">
+                                <i class="fas fa-credit-card me-1"></i> 点击前往支付
+                            </a>
+                        </div>
+                    `;
+                    tipEl.innerHTML = `支付金额：<strong>${data.amount}</strong> 元 | ${data.gateway_name || '易支付'}`;
+                    document.getElementById('poll-status').style.display = 'block';
+                    startPolling();
+                    if (isMobile()) {
+                        setTimeout(() => { window.location.href = data.pay_url; }, 800);
+                    }
+                }
+
             } catch (e) {
                 console.error(e);
                 qrContainer.innerHTML = '<span class="text-danger">网络连接错误</span>';
@@ -310,6 +344,18 @@
         }
 
         function handlePaySuccess(data) {
+            // 付款成功后清除购物车中已购买的商品
+            try {
+                const checkedItems = JSON.parse(localStorage.getItem('tbShopCartChecked') || '[]');
+                if (checkedItems.length > 0) {
+                    let cart = JSON.parse(localStorage.getItem('tbShopCart') || '[]');
+                    const checkedKeys = new Set(checkedItems.map(i => (i.productId||i.product_id) + '_' + (i.variantId||i.variant_id)));
+                    cart = cart.filter(item => !checkedKeys.has((item.productId||item.product_id) + '_' + (item.variantId||item.variant_id)));
+                    localStorage.setItem('tbShopCart', JSON.stringify(cart));
+                }
+                localStorage.removeItem('tbShopCartChecked');
+            } catch(e) { localStorage.removeItem('tbShopCartChecked'); }
+
             const qrContainer = document.getElementById('qr-container');
             const tipEl = document.getElementById('pay-status-tip');
             const pollStatus = document.getElementById('poll-status');
@@ -339,38 +385,53 @@
             }
 
             let processedCards = [];
+            let rawCards = [];
             cardsArray.forEach(item => {
                 if (typeof item === 'string' && item.trim() !== "") {
                     processedCards.push(item);
+                    rawCards.push(item);
                 } else if (typeof item === 'object' && item !== null) {
                     if (Array.isArray(item.cards) && item.cards.length > 0) {
                         item.cards.forEach(c => {
                             processedCards.push(`[${item.productName || item.variantName}] ${c}`);
+                            rawCards.push(c);
                         });
                     }
                 }
             });
 
+            // [复制按钮] 降级保护：header.js 未加载完成时不渲染按钮，保持原样展示
+            const XY = window.XYFK || null;
+            const xyCopyBtn = (raw, btnClass, innerHtml, title, okMsg) => XY
+                ? `<button type="button" class="${btnClass}" data-xy-copy="${XY.enc(raw)}" data-xy-msg="${XY.esc(okMsg)}" title="${title}" aria-label="${title}">${innerHtml}</button>`
+                : '';
+
             if (processedCards.length > 0) {
-                const cardItems = processedCards.map(card =>
-                    `<div class="p-2 mb-2 bg-white border rounded text-break user-select-all" style="font-family: monospace; font-size: 14px; color: #333;">${card}</div>`
+                const cardItems = processedCards.map((card, i) =>
+                    `<div class="d-flex align-items-start p-2 mb-2 bg-white border rounded">
+                        <div class="flex-grow-1 text-break user-select-all me-2" style="font-family: monospace; font-size: 14px; color: #333; word-break: break-all;">${XY ? XY.esc(card) : card}</div>
+                        ${xyCopyBtn(rawCards[i], 'btn btn-sm btn-outline-secondary px-2 py-1 flex-shrink-0', '<i class="far fa-copy"></i>', '复制这条卡密', '已复制 1 条卡密')}
+                    </div>`
                 ).join('');
 
                 cardsHtml = `
                     <div class="alert alert-success mt-4 shadow-sm border-0">
-                        <h6 class="alert-heading fw-bold mb-3">
-                            <i class="fas fa-gift me-2"></i> 您的卡密信息
-                        </h6>
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h6 class="alert-heading fw-bold mb-0">
+                                <i class="fas fa-gift me-2"></i> 您的卡密信息
+                            </h6>
+                            ${xyCopyBtn(rawCards.join('\n'), 'btn btn-sm btn-success rounded-pill px-3', '<i class="far fa-copy me-1"></i>复制全部', '复制全部卡密', '已复制 ' + rawCards.length + ' 条卡密')}
+                        </div>
                         <div class="bg-light p-3 rounded border">
                             ${cardItems}
                         </div>
                         <div class="mt-2 text-muted small text-center">
-                            <i class="fas fa-info-circle"></i> 请长按或复制上方卡密保存
+                            <i class="fas fa-info-circle"></i> 点击 <i class="far fa-copy"></i> 图标一键复制（复制纯卡密，可直接粘贴使用），或长按卡密手动复制
                         </div>
                         ${data.status == 1 ? '<div class="mt-3 alert alert-warning small py-2 mb-0 fw-bold text-center text-danger"><i class="fas fa-exclamation-triangle"></i> 注意：订单中包含手动发货商品，请联系客服发货。</div>' : ''}
                     </div>
                     <div class="text-center mt-4">
-                        <a href="/orders" class="btn btn-outline-primary rounded-pill px-4">
+                        <a href="#" onclick="event.preventDefault();window.location.href=localStorage.getItem('member_token')?'/member':'/orders'" class="btn btn-outline-primary rounded-pill px-4">
                             查看历史订单
                         </a>
                     </div>
@@ -382,7 +443,7 @@
                         <p class="mb-0 fw-bold" style="color: red;">该订单包含手动发货商品，请联系商家发货。</p>
                     </div>
                     <div class="text-center mt-3">
-                        <a href="/orders" class="btn btn-primary rounded-pill px-4">前往订单页</a>
+                        <a href="#" onclick="event.preventDefault();window.location.href=localStorage.getItem('member_token')?'/member':'/orders'" class="btn btn-primary rounded-pill px-4">前往订单页</a>
                     </div>
                 `;
             }
@@ -395,6 +456,44 @@
                 checkoutArea.appendChild(resultDiv);
             }
         }
+    
+        // === 会员余额支付 ===
+        (async function() {
+            const token = localStorage.getItem('member_token');
+            if (!token) return;
+            try {
+                const res = await fetch('/api/member/profile', { headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await res.json();
+                if (data.user) {
+                    document.getElementById('pay-balance-amount').textContent = data.user.balance.toFixed(2);
+                    document.getElementById('balance-pay-section').style.display = 'block';
+                }
+            } catch(e) {}
+        })();
+
+        async function balancePayCurrentOrder() {
+            const token = localStorage.getItem('member_token');
+            if (!token) { window.location.href = '/member/login'; return; }
+            if (!currentOrderId) return;
+            const errEl = document.getElementById('balance-pay-error');
+            errEl.style.display = 'none';
+            if (!confirm('确定使用余额支付此订单？')) return;
+            try {
+                const res = await fetch('/api/member/balance_pay', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ order_id: currentOrderId })
+                });
+                const data = await res.json();
+                if (data.error) { errEl.textContent = data.error; errEl.style.display = 'block'; return; }
+                if (data.cards && data.cards.length > 0) {
+                    handlePaySuccess({ status: 2, cards: data.cards });
+                } else {
+                    handlePaySuccess({ status: 2, cards: [] });
+                }
+            } catch(e) { errEl.textContent = '请求失败，请重试'; errEl.style.display = 'block'; }
+        }
+
     </script>
 
 </body>

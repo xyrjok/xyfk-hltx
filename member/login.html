@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>会员登录 - XYFK</title>
+    <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+    <style>
+        body { background-color: #f5f5f5; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        #login-wrapper {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background-color: #f5f5f5;
+            display: flex; justify-content: center; align-items: center;
+            z-index: 1000;
+        }
+        .login-container {
+            width: 100%; max-width: 380px; box-sizing: border-box; padding: 40px;
+            background-color: #fff; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            border-radius: 8px; text-align: center;
+        }
+        .login-header { margin-bottom: 10px; }
+        .form-group { margin-bottom: 20px; text-align: left; }
+        .form-control {
+            display: block; width: 100%; padding: 10px 12px; font-size: 14px;
+            line-height: 1.42857143; color: #555; background-color: #fff;
+            background-image: none; border: 1px solid #ccc; border-radius: 4px;
+            box-shadow: inset 0 1px 1px rgba(0,0,0,.075);
+            transition: border-color ease-in-out .15s, box-shadow ease-in-out .15s;
+            box-sizing: border-box;
+        }
+        .form-control:focus { border-color: #66afe9; outline: 0; box-shadow: inset 0 1px 1px rgba(0,0,0,.075), 0 0 8px rgba(102,175,233,.6); }
+        .xyrj-primary { color: #fff; background-color: #409EFF; border: none; }
+        .xyrj-primary:hover { background-color: #3390ff; color: #fff; }
+        .xyrj-login {
+            width: 100%; padding: 8px 12px; font-size: 16px; border-radius: 4px; cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .auth-tabs { display: flex; margin-bottom: 20px; border-bottom: 2px solid #eee; }
+        .auth-tab { flex: 1; text-align: center; padding: 10px 0; cursor: pointer; font-size: 15px; font-weight: 600; color: #999; transition: all 0.3s; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .auth-tab.active { color: #409EFF; border-bottom-color: #409EFF; }
+        .auth-form { display: none; }
+        .auth-form.active { display: block; }
+        .footer-link { margin-top: 20px; font-size: 13px; color: #777; }
+        .footer-link a { color: #409EFF; text-decoration: none; }
+        .form-group .error-tip { font-size: 12px; color: #f56c6c; margin-top: 4px; display: none; }
+        .captcha-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+        .captcha-row input { width: 55%; }
+        .captcha-img-box {
+            width: 40%; height: 42px; cursor: pointer; border-radius: 4px;
+            overflow: hidden; display: flex; align-items: center; justify-content: center;
+            background: #f4f6f8; border: 1px solid #ddd;
+        }
+        .captcha-img-box svg { max-width: 100%; max-height: 100%; }
+    </style>
+</head>
+<body>
+
+<div id="login-wrapper">
+    <div class="login-container">
+        <div class="login-header"></div>
+
+        <div class="auth-tabs">
+            <div class="auth-tab active" onclick="switchTab('login')">登录</div>
+            <div class="auth-tab" id="register-tab" onclick="switchTab('register')">注册</div>
+        </div>
+
+        <div id="reg-closed-notice" style="display:none; margin-top:8px; font-size:12px; color:#999; text-align:center;">会员系统已关闭，暂不开放注册</div>
+
+        <!-- 登录表单 -->
+        <form id="login-form" class="auth-form active" onsubmit="return handleLogin(event)">
+            <div class="form-group">
+                <input type="email" class="form-control" id="login-username" placeholder="请输入邮箱" required>
+            </div>
+            <div class="form-group">
+                <input type="password" class="form-control" id="login-password" placeholder="请输入密码" required>
+            </div>
+            <div class="form-group">
+                <div class="captcha-row">
+                    <input type="text" class="form-control" id="login-captcha" placeholder="验证码" autocomplete="off" required>
+                    <div class="captcha-img-box" id="login-captcha-img" onclick="loadCaptcha('login')" title="看不清？点击刷新"></div>
+                </div>
+            </div>
+            <div id="login-error" class="error-tip"></div>
+            <button type="submit" class="xyrj-primary xyrj-login" id="login-btn">登 录</button>
+        </form>
+
+        <!-- 注册表单 -->
+        <form id="register-form" class="auth-form" onsubmit="return handleRegister(event)">
+            <div class="form-group">
+                <input type="email" class="form-control" id="reg-email" placeholder="请输入邮箱" required>
+            </div>
+            <div class="form-group">
+                <input type="password" class="form-control" id="reg-password" placeholder="密码 (不少于6位)" required>
+            </div>
+            <div class="form-group">
+                <input type="password" class="form-control" id="reg-password2" placeholder="确认密码" required>
+            </div>
+            <div class="form-group">
+                <div class="captcha-row">
+                    <input type="text" class="form-control" id="reg-captcha" placeholder="验证码" autocomplete="off" required>
+                    <div class="captcha-img-box" id="reg-captcha-img" onclick="loadCaptcha('reg')" title="看不清？点击刷新"></div>
+                </div>
+            </div>
+            <div id="reg-error" class="error-tip"></div>
+            <button type="submit" class="xyrj-primary xyrj-login" id="reg-btn">注 册</button>
+        </form>
+
+        <div class="footer-link">Powered by XYRJ-Faka</div>
+    </div>
+</div>
+
+<script src="/assets/jquery-3.6.0.min.js"></script>
+<script>
+    if (localStorage.getItem('member_token')) window.location.href = '/member';
+
+    // 加载站点 Logo
+    fetch('/api/shop/config').then(r => r.json()).then(config => {
+        const header = document.querySelector('.login-header');
+        if (config.site_logo) {
+            header.innerHTML = '<img src="' + config.site_logo + '" alt="Logo" style="max-height: 47px; max-width: 100%;">';
+        } else {
+            header.innerHTML = '<h1 style="margin:0;font-size:24px;color:#333;">' + (config.site_name || '会员中心') + '</h1>';
+        }
+        // [会员系统开关] 后台关闭时隐藏"注册"Tab，只保留登录（老会员仍可登录）
+        if (config.member_enabled !== '1') {
+            const regTab = document.getElementById('register-tab');
+            if (regTab) regTab.style.display = 'none';
+            const regNotice = document.getElementById('reg-closed-notice');
+            if (regNotice) regNotice.style.display = 'block';
+        }
+    }).catch(() => {
+        document.querySelector('.login-header').innerHTML = '<h1 style="margin:0;font-size:24px;color:#333;">会员中心</h1>';
+    });
+
+    // 验证码状态
+    const captchaState = { login: {}, reg: {} };
+
+    async function loadCaptcha(form) {
+        try {
+            const res = await fetch('/api/member/captcha');
+            const data = await res.json();
+            captchaState[form] = { hash: data.hash, expire: data.expire };
+            document.getElementById(form + '-captcha-img').innerHTML = data.svg;
+        } catch(e) { console.error('验证码加载失败'); }
+    }
+
+    // 初始化加载验证码
+    loadCaptcha('login');
+    loadCaptcha('reg');
+
+    function switchTab(tab) {
+        // [会员系统开关] 会员系统关闭时不允许切到注册页
+        const regTabEl = document.getElementById('register-tab');
+        if (tab === 'register' && regTabEl && regTabEl.style.display === 'none') return;
+        $('.auth-tab').removeClass('active');
+        $('.auth-form').removeClass('active');
+        if (tab === 'login') {
+            $('.auth-tab').eq(0).addClass('active');
+            $('#login-form').addClass('active');
+        } else {
+            $('.auth-tab').eq(1).addClass('active');
+            $('#register-form').addClass('active');
+        }
+    }
+
+    async function handleLogin(e) {
+        e.preventDefault();
+        const btn = $('#login-btn');
+        const errEl = $('#login-error');
+        errEl.hide();
+        const captchaText = $('#login-captcha').val().trim();
+        if (!captchaText) { errEl.text('请输入验证码').show(); return false; }
+        btn.prop('disabled', true).text('登录中...');
+        try {
+            const res = await fetch('/api/member/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    username: $('#login-username').val().trim(),
+                    password: $('#login-password').val(),
+                    captchaText: captchaText,
+                    captchaHash: captchaState.login.hash,
+                    captchaExpire: captchaState.login.expire
+                })
+            });
+            const data = await res.json();
+            if (data.error) {
+                errEl.text(data.error).show();
+                loadCaptcha('login');
+            } else {
+                localStorage.setItem('member_token', data.token);
+                localStorage.setItem('member_user', JSON.stringify(data.user));
+                window.location.href = '/member';
+            }
+        } catch (err) {
+            errEl.text('网络错误，请重试').show();
+            loadCaptcha('login');
+        }
+        btn.prop('disabled', false).text('登 录');
+        return false;
+    }
+
+    async function handleRegister(e) {
+        e.preventDefault();
+        const btn = $('#reg-btn');
+        const errEl = $('#reg-error');
+        errEl.hide();
+        const regEmail = $('#reg-email').val().trim();
+        if (!regEmail) { errEl.text('请输入邮箱').show(); return false; }
+        const pwd = $('#reg-password').val();
+        const pwd2 = $('#reg-password2').val();
+        if (pwd !== pwd2) { errEl.text('两次密码不一致').show(); return false; }
+        const captchaText = $('#reg-captcha').val().trim();
+        if (!captchaText) { errEl.text('请输入验证码').show(); return false; }
+        btn.prop('disabled', true).text('注册中...');
+        try {
+            const res = await fetch('/api/member/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    username: regEmail,
+                    email: regEmail,
+                    password: pwd,
+                    captchaText: captchaText,
+                    captchaHash: captchaState.reg.hash,
+                    captchaExpire: captchaState.reg.expire
+                })
+            });
+            const data = await res.json();
+            if (data.error) {
+                errEl.text(data.error).show();
+                loadCaptcha('reg');
+            } else {
+                localStorage.setItem('member_token', data.token);
+                localStorage.setItem('member_user', JSON.stringify(data.user));
+                window.location.href = '/member';
+            }
+        } catch (err) {
+            errEl.text('网络错误，请重试').show();
+            loadCaptcha('reg');
+        }
+        btn.prop('disabled', false).text('注 册');
+        return false;
+    }
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            if ($('#login-form').hasClass('active')) handleLogin(e);
+            else handleRegister(e);
+        }
+    });
+</script>
+</body>
+</html>

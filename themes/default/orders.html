@@ -107,6 +107,39 @@
             background-color: #cfe2ff;
         }
         .tab-pane:not(.show) { display: none; }
+
+        /* 验证码样式 */
+        .captcha-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .captcha-row input {
+            flex: 1;
+        }
+        .captcha-img {
+            cursor: pointer;
+            height: 38px;
+            border-radius: 4px;
+            overflow: hidden;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            background: #f4f6f8;
+            border: 1px solid #ddd;
+        }
+        .captcha-img:hover {
+            border-color: #409EFF;
+        }
+
+        /* 查单密码可见性切换（眼睛图标） */
+        .pwd-wrap { position: relative; }
+        .pwd-wrap .form-control { padding-right: 34px; }
+        .toggle-pwd {
+            position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+            cursor: pointer; color: #adb5bd; z-index: 5; font-size: 14px;
+        }
+        .toggle-pwd:hover { color: var(--luna-primary-blue, #0d6efd); }
     </style>
 </head>
 <body>
@@ -131,6 +164,10 @@
             <div class="detail-right" id="sidebar-wrapper">
                 <div class="sidebar-inner main-box p-3">
                     <h6 class="fw-bold border-bottom pb-3 mb-3">订单查询</h6>
+                    <div class="alert alert-warning small py-2 d-flex align-items-start mb-3" role="alert">
+                        <i class="fas fa-info-circle me-2 mt-1"></i>
+                        <div>提示：本站仅支持查询最近 30 天内下单的订单</div>
+                    </div>
                     
                     <ul class="nav nav-tabs mb-4 justify-content-center" id="queryTabs" role="tablist" style="font-size: 14px;">
                         <li class="nav-item" role="presentation">
@@ -151,9 +188,20 @@
                                 <label class="form-label small text-muted">联系方式</label>
                                 <input type="text" class="form-control form-control-sm" id="input-contact" placeholder="QQ/手机/邮箱">
                             </div>
+                            <div class="mb-3">
+                                <label class="form-label small text-muted">查单密码 <span class="text-danger">*</span></label>
+                                <div class="pwd-wrap">
+                                    <input type="password" class="form-control form-control-sm pe-5" id="input-password" placeholder="至少4位密码">
+                                    <i class="far fa-eye toggle-pwd" id="toggle-password" onclick="togglePassword()" title="显示/隐藏密码" aria-label="显示/隐藏密码"></i>
+                                </div>
+                            </div>
+                            <!-- [安全加固] 验证码 -->
                             <div class="mb-4">
-                                <label class="form-label small text-muted">查单密码</label>
-                                <input type="password" class="form-control form-control-sm" id="input-password" placeholder="下单时的密码">
+                                <label class="form-label small text-muted">验证码 <span class="text-danger">*</span></label>
+                                <div class="captcha-row">
+                                    <input type="text" class="form-control form-control-sm" id="input-captcha" placeholder="输入验证码" autocomplete="off" maxlength="4">
+                                    <div class="captcha-img" id="captcha-img" onclick="loadCaptcha()" title="看不清？点击刷新"></div>
+                                </div>
                             </div>
                             <button class="btn btn-primary w-100 py-2 fw-bold" onclick="queryByContact(false)" style="background-color: var(--luna-primary-blue);">立即查询</button>
                         </div>
@@ -178,19 +226,34 @@
     <script src="/files/footer.js"></script>
     <script src="/files/main-default-bs.js"></script>
     <script>
+        // [安全加固] 验证码相关变量
+        let currentCaptchaHash = '';
+        let currentCaptchaExpire = 0;
+
         // 页面初始化
         $(document).ready(function() {
-            // 检查本地缓存
             checkLocalCache();
+            loadCaptcha(); // 加载验证码
             
-            // 如果 URL 带有 contact 参数（可能是从支付页跳回），自动填充
-            // 但为了安全，通常还是读 localStorage
             const c = localStorage.getItem('userContact');
             const p = localStorage.getItem('userPassword');
             if(c && p && document.referrer.includes('product')) {
                  queryByContact(true);
             }            
         });
+
+        // [安全加固] 加载验证码
+        async function loadCaptcha() {
+            try {
+                const res = await fetch('/api/admin/captcha');
+                const data = await res.json();
+                document.getElementById('captcha-img').innerHTML = data.svg;
+                currentCaptchaHash = data.hash;
+                currentCaptchaExpire = data.expire;
+            } catch (e) {
+                console.error('验证码加载失败');
+            }
+        }
 
         function checkLocalCache() {
             const c = localStorage.getItem('userContact');
@@ -204,9 +267,23 @@
             }
         }
 
+        // 查单密码明文/掩码切换
+        function togglePassword() {
+            const input = document.getElementById('input-password');
+            const icon = document.getElementById('toggle-password');
+            if (input.type === 'password') {
+                input.type = 'text';
+                icon.classList.remove('fa-eye');
+                icon.classList.add('fa-eye-slash');
+            } else {
+                input.type = 'password';
+                icon.classList.remove('fa-eye-slash');
+                icon.classList.add('fa-eye');
+            }
+        }
+
         function showResult(html) {
             $('#result-content').html(html);
-            // --- 修改处：不再操作 #result-area 的 display，因为它已在 Grid 中占位 ---
             $('html, body').animate({
                 scrollTop: $("#result-area").offset().top - 20
             }, 500);
@@ -231,6 +308,11 @@
             }
             
             if (!contact || !pass) { alert('请输入联系方式和查单密码'); return; }
+            if (pass.length < 3) { alert('查单密码不能少于3位'); return; }
+
+            // [安全加固] 获取验证码
+            const captchaText = $('#input-captcha').val().trim();
+            if (!captchaText) { alert('请输入验证码'); return; }
 
             // 更新缓存
             localStorage.setItem('userContact', contact);
@@ -247,7 +329,13 @@
                 const res = await fetch('/api/shop/orders/query', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ contact, query_password: pass })
+                    body: JSON.stringify({ 
+                        contact, 
+                        query_password: pass,
+                        captchaText: captchaText,
+                        captchaHash: currentCaptchaHash,
+                        captchaExpire: currentCaptchaExpire
+                    })
                 });
                 const data = await res.json();
 
@@ -262,6 +350,7 @@
                 showError(e.message || '查询失败');
             } finally {
                 btn.html(originalText).prop('disabled', false);
+                loadCaptcha(); // 查询后刷新验证码
             }
         }
 
@@ -337,19 +426,20 @@
             const originalText = btn.html();
             btn.html('<i class="fas fa-spinner fa-spin"></i>').prop('disabled', true);
 
-            // --- 修改处：只清空内容，不隐藏容器 ---
             $('#result-content').html('<div class="text-center py-5"><i class="fas fa-spinner fa-spin fa-2x"></i></div>');
 
-            fetch(`/api/shop/order/status?order_id=${orderId}`)
+            // [订单查询限制] 前台仅支持查询最近 30 天内的订单，window_days 由服务端校验
+            fetch(`/api/shop/order/status?order_id=${orderId}&window_days=30`)
                 .then(res => res.json())
                 .then(data => {
+                    if (data.error) throw new Error(data.error);
                     if (data.status >= 1) {
                         renderSuccessSingle(orderId, data.cards, data.status);
                     } else {
-                        showError('订单未支付、不存在或未发货。<br>如需管理未支付订单，请使用“联系方式查询”。');
+                        showError('订单未支付、不存在或未发货。<br>如需管理未支付订单，请使用"联系方式查询"。');
                     }
                 })
-                .catch(err => showError('查询出错'))
+                .catch(err => showError(err.message || '查询出错'))
                 .finally(() => {
                     btn.html(originalText).prop('disabled', false);
                 });
@@ -376,7 +466,6 @@
 
         // --- 辅助函数 ---
         
-        // 删除订单逻辑
         async function deleteOrder(orderId) {
             if(!confirm('确定要删除这个未支付的订单吗？')) return;
             
@@ -409,32 +498,60 @@
         function renderCardsHtml(cards) {
             if (!cards || cards.length === 0) return '<div class="text-muted small">无发货内容</div>';
             
-            let contentStr = '';
-            if (cards.length > 0 && typeof cards[0] === 'object') {
-                 // 处理购物车合并订单的卡密格式
-                 contentStr = cards.map(item => `[${item.variantName} x${item.quantity}]`).join('\n') + '\n(请查看具体发货详情)';
-            } else {
-                 contentStr = cards.join('\n');
+            // [复制按钮] 与收银台 pay.html 保持一致：逐条复制 + 复制全部，XYFK 未加载时降级为不渲染按钮
+            const XY = window.XYFK || null;
+            const mkBtn = (raw, label, title, okMsg, cls) => XY
+                ? '<button type="button" class="' + cls + '" data-xy-copy="' + XY.enc(raw) + '" data-xy-msg="' + XY.esc(okMsg) + '" title="' + title + '" aria-label="' + title + '">' + label + '</button>'
+                : '';
+
+            // 形态① 占位/摘要（购物车未发货占位、自选卡密占位）：没有真实卡密内容，保持原展示，只给一个复制按钮
+            if (typeof cards[0] === 'object' && cards[0] !== null && !Array.isArray(cards[0].cards)) {
+                const contentStr = cards.map(item => `[${item.variantName || item.productName || '指定商品'} x${item.quantity || 1}]`).join('\n') + '\n(请查看具体发货详情)';
+                return `
+                <div class="card-content-box">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <span class="small text-muted">发货摘要</span>
+                        ${mkBtn(contentStr, '复制', '复制发货摘要', '已复制发货摘要', 'btn-copy')}
+                    </div>
+                    <div style="white-space: pre-wrap;">${escapeHtml(contentStr)}</div>
+                </div>
+            `;
             }
+
+            // 形态② 真实卡密：归一化为 {display, raw}，display 带商品名便于对照，raw 为可直接粘贴使用的纯卡密
+            const rows = [];
+            cards.forEach(item => {
+                if (typeof item === 'string') rows.push({ display: item, raw: item });
+                else if (item && Array.isArray(item.cards)) {
+                    item.cards.forEach(c => rows.push({ display: `[${item.productName || item.variantName || ''}] ${c}`, raw: String(c) }));
+                }
+            });
+            if (rows.length === 0) return '<div class="text-muted small">无发货内容</div>';
+
+            const items = rows.map(r => `
+                <div class="d-flex align-items-start py-1" style="border-top: 1px dashed rgba(0,0,0,.08);">
+                    <div class="flex-grow-1 me-2 user-select-all" style="white-space: pre-wrap; word-break: break-all;">${escapeHtml(r.display)}</div>
+                    ${mkBtn(r.raw, '复制', '复制这条卡密', '已复制 1 条卡密', 'btn-copy flex-shrink-0')}
+                </div>
+            `).join('');
 
             return `
                 <div class="card-content-box">
-                    <div style="white-space: pre-wrap;">${escapeHtml(contentStr)}</div>
-                    <div class="text-end">
-                         <button class="btn-copy" onclick="copyText(this)">复制卡密</button>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span class="small text-muted">共 ${rows.length} 条卡密</span>
+                        ${mkBtn(rows.map(r => r.raw).join('\n'), '复制全部', '复制全部卡密', '已复制 ' + rows.length + ' 条卡密', 'btn-copy')}
                     </div>
+                    ${items}
                 </div>
             `;
         }
 
+        // 兼容保留全局 copyText（后台自定义 custom_js 可能仍在调用），内部转交 XYFK 以获得降级与反馈
         function copyText(btn) {
-            // 获取同级的前一个 div 的文本
-            const content = $(btn).parent().prev().text();
-            navigator.clipboard.writeText(content).then(() => {
-                const o = $(btn).text(); 
-                $(btn).text('已复制').addClass('text-success');
-                setTimeout(() => $(btn).text(o).removeClass('text-success'), 2000);
-            });
+            const prev = btn.previousElementSibling || (btn.parentElement && btn.parentElement.previousElementSibling);
+            const content = prev ? prev.textContent : '';
+            if (window.XYFK) window.XYFK.copy(content, btn, '已复制');
+            else if (navigator.clipboard) navigator.clipboard.writeText(content);
         }
 
         function escapeHtml(text) {
