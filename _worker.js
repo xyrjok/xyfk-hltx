@@ -910,7 +910,10 @@ async function refreshOutlookTokens(db) {
 
 
 // [新增] 会员系统表结构兼容初始化：旧数据库（无会员系统的旧版建库）自动补齐缺失的表和列，全部幂等不报错
+// [性能优化] 每个运行实例只执行一次，避免每个请求都跑 DDL（失败的 ALTER 同样消耗 D1 往返）拖慢接口
+let _memberSchemaEnsured = false;
 async function ensureMemberTables(db) {
+    if (_memberSchemaEnsured) return;
     try {
         await db.prepare(`CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -944,15 +947,24 @@ async function ensureMemberTables(db) {
         'ALTER TABLE users ADD COLUMN member_level INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN total_recharge REAL DEFAULT 0',
         'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)',
-        'ALTER TABLE orders ADD COLUMN user_id INTEGER'
+        'ALTER TABLE orders ADD COLUMN user_id INTEGER',
+        // [性能优化] 会员列表/详情的关联查询走索引，避免 orders 增长后逐行全表扫描
+        'CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)',
+        'CREATE INDEX IF NOT EXISTS idx_balance_transactions_user_id ON balance_transactions(user_id)',
+        'CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)'
     ]) {
         try { await db.prepare(ddl).run(); } catch(e) {}
     }
+    _memberSchemaEnsured = true;
 }
 
 // [新增] 支付网关表兼容初始化：旧库自动补 member_recharge 列（会员充值开关），幂等不报错
+// [性能优化] 同样每个运行实例只执行一次
+let _payGatewaySchemaEnsured = false;
 async function ensurePayGatewayColumns(db) {
+    if (_payGatewaySchemaEnsured) return;
     try { await db.prepare('ALTER TABLE pay_gateways ADD COLUMN member_recharge INTEGER DEFAULT 0').run(); } catch(e) {}
+    _payGatewaySchemaEnsured = true;
 }
 
 async function handleApi(request, env, url, ctx) {
@@ -2217,12 +2229,7 @@ async function handleApi(request, env, url, ctx) {
                 if (initialBalance < 0) return errRes('初始余额不能为负数');
                 const initialLevel = parseInt(member_level) || 0;
                 if (initialLevel < 0) return errRes('等级不能为负数');
-                // 兼容旧数据库: 尝试添加必要字段
-                try { await db.prepare('ALTER TABLE users ADD COLUMN password_encrypted TEXT').run(); } catch(e) {}
-                try { await db.prepare('ALTER TABLE users ADD COLUMN frozen INTEGER DEFAULT 0').run(); } catch(e) {}
-                try { await db.prepare('ALTER TABLE users ADD COLUMN member_level INTEGER DEFAULT 0').run(); } catch(e) {}
-                try { await db.prepare('ALTER TABLE users ADD COLUMN total_recharge REAL DEFAULT 0').run(); } catch(e) {}
-                try { await db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)').run(); } catch(e) {}
+                // 列/索引兼容已由 ensureMemberTables 统一处理（每个实例仅一次），不再逐请求 ALTER
                 const existing = await db.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
                 if (existing) return errRes('该邮箱已注册');
                 // 用户名：未填写时自动生成序号（001, 002, 003...），与注册接口逻辑一致
@@ -2249,10 +2256,7 @@ async function handleApi(request, env, url, ctx) {
             // 会员列表
             if (path === '/api/admin/members/list') {
                 const search = url.searchParams.get('search') || '';
-                // 确保 frozen 字段存在 (兼容旧数据库)
-                try { await db.prepare('ALTER TABLE users ADD COLUMN frozen INTEGER DEFAULT 0').run(); } catch(e) {}
-                try { await db.prepare('ALTER TABLE users ADD COLUMN member_level INTEGER DEFAULT 0').run(); } catch(e) {}
-                try { await db.prepare('ALTER TABLE users ADD COLUMN total_recharge REAL DEFAULT 0').run(); } catch(e) {}
+                // frozen/member_level/total_recharge 列已由 ensureMemberTables 统一兼容（每个实例仅一次），不再逐请求 ALTER
                 let query = 'SELECT u.id, u.username, u.email, u.balance, u.frozen, u.member_level, u.total_recharge, u.created_at, u.updated_at, (SELECT COUNT(*) FROM orders WHERE user_id=u.id) as order_count FROM users u';
                 let params = [];
                 if (search) {
@@ -2276,10 +2280,7 @@ async function handleApi(request, env, url, ctx) {
             if (path === '/api/admin/member/detail') {
                 const id = url.searchParams.get('id');
                 if (!id) return errRes('缺少会员ID');
-                try { await db.prepare('ALTER TABLE users ADD COLUMN frozen INTEGER DEFAULT 0').run(); } catch(e) {}
-                try { await db.prepare('ALTER TABLE users ADD COLUMN password_encrypted TEXT').run(); } catch(e) {}
-                try { await db.prepare('ALTER TABLE users ADD COLUMN member_level INTEGER DEFAULT 0').run(); } catch(e) {}
-                try { await db.prepare('ALTER TABLE users ADD COLUMN total_recharge REAL DEFAULT 0').run(); } catch(e) {}
+                // 列兼容已由 ensureMemberTables 统一处理，不再逐请求 ALTER
                 const user = await db.prepare('SELECT id, username, email, balance, frozen, member_level, total_recharge, password_encrypted, created_at, updated_at FROM users WHERE id=?').bind(id).first();
                 if (!user) return errRes('会员不存在');
                 user.password_plaintext = user.password_encrypted ? await decryptPassword(user.password_encrypted, env) : null;
@@ -2339,7 +2340,6 @@ async function handleApi(request, env, url, ctx) {
             if (path === '/api/admin/member/freeze' && method === 'POST') {
                 const { user_id, frozen } = await request.json();
                 if (!user_id || frozen === undefined) return errRes('参数不完整');
-                try { await db.prepare('ALTER TABLE users ADD COLUMN frozen INTEGER DEFAULT 0').run(); } catch(e) {}
                 const member = await db.prepare('SELECT id FROM users WHERE id=?').bind(user_id).first();
                 if (!member) return errRes('会员不存在');
                 await db.prepare('UPDATE users SET frozen=?, updated_at=? WHERE id=?').bind(frozen ? 1 : 0, time(), user_id).run();
@@ -2351,7 +2351,6 @@ async function handleApi(request, env, url, ctx) {
                 const { user_id, member_level } = await request.json();
                 if (user_id === undefined || member_level === undefined) return errRes('参数不完整');
                 if (member_level < 0) return errRes('等级不能为负数');
-                try { await db.prepare('ALTER TABLE users ADD COLUMN member_level INTEGER DEFAULT 0').run(); } catch(e) {}
                 const member = await db.prepare('SELECT id FROM users WHERE id=?').bind(user_id).first();
                 if (!member) return errRes('会员不存在');
                 await db.prepare('UPDATE users SET member_level=?, updated_at=? WHERE id=?').bind(member_level, time(), user_id).run();
@@ -2602,9 +2601,7 @@ async function handleApi(request, env, url, ctx) {
             const maxRow = await db.prepare("SELECT username FROM users WHERE username GLOB '[0-9]*' ORDER BY CAST(username AS INTEGER) DESC LIMIT 1").first();
             const nextNum = maxRow ? (parseInt(maxRow.username, 10) || 0) + 1 : 1;
             const autoUsername = String(nextNum).padStart(3, '0');
-            // 兼容旧数据库: 尝试添加必要字段
-            try { await db.prepare('ALTER TABLE users ADD COLUMN password_encrypted TEXT').run(); } catch(e) {}
-            try { await db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)').run(); } catch(e) {}
+            // 列/索引兼容已由 ensureMemberTables 统一处理，不再逐请求 ALTER
             const result = await db.prepare('INSERT INTO users (username, password_hash, password_encrypted, email, balance, frozen, created_at, updated_at) VALUES (?, ?, ?, ?, 0, 0, ?, ?)').bind(autoUsername, passwordHash, passwordEncrypted, regEmail, now, now).run();
             const userId = result.meta.last_row_id;
             const token = await generateToken(userId, env);
@@ -2906,7 +2903,6 @@ async function handleApi(request, env, url, ctx) {
             // 更新密码 (自动使用新的 PBKDF2 哈希)
             const newHash = await hashPassword(new_password, env);
             const newEncrypted = await encryptPassword(new_password, env);
-            try { await db.prepare('ALTER TABLE users ADD COLUMN password_encrypted TEXT').run(); } catch(e) {}
             await db.prepare('UPDATE users SET password_hash=?, password_encrypted=?, updated_at=? WHERE id=?').bind(newHash, newEncrypted, time(), user.id).run();
             return jsonRes({ success: true, message: '密码修改成功' });
         }
@@ -2993,8 +2989,8 @@ async function handleApi(request, env, url, ctx) {
                 if (authHeader && authHeader.startsWith('Bearer ')) {
                     const mUserId = await verifyToken(authHeader.substring(7), env);
                     if (mUserId) {
-                        // 兼容旧数据库：确保 password_encrypted 列存在
-                        try { await db.prepare('ALTER TABLE users ADD COLUMN password_encrypted TEXT').run(); } catch(e) {}
+                        // 兼容旧数据库：表结构补齐（每实例仅一次）
+                        await ensureMemberTables(db);
                         const mUser = await db.prepare('SELECT id, username, email, frozen, password_encrypted FROM users WHERE id=?').bind(mUserId).first();
                         if (mUser) {
                             if (mUser.frozen === 1) return errRes('账户已被冻结，无法下单，请联系客服', 403);
@@ -3140,8 +3136,8 @@ async function handleApi(request, env, url, ctx) {
                 if (authHeader && authHeader.startsWith('Bearer ')) {
                     const mUserId = await verifyToken(authHeader.substring(7), env);
                     if (mUserId) {
-                        // 兼容旧数据库：确保 password_encrypted 列存在
-                        try { await db.prepare('ALTER TABLE users ADD COLUMN password_encrypted TEXT').run(); } catch(e) {}
+                        // 兼容旧数据库：表结构补齐（每实例仅一次）
+                        await ensureMemberTables(db);
                         const mUser = await db.prepare('SELECT id, username, email, frozen, password_encrypted FROM users WHERE id=?').bind(mUserId).first();
                         if (mUser) {
                             if (mUser.frozen === 1) return errRes('账户已被冻结，无法下单，请联系客服', 403);
