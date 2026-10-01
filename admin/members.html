@@ -340,6 +340,8 @@
             return;
         }
         document.getElementById('member-count').textContent = data.members.length;
+        // [性能优化] 先拼好字符串再一次写入，避免循环里反复 innerHTML += 触发 O(n²) 的 DOM 重解析
+        const rows = [];
         data.members.forEach(m => {
             const time = m.created_at ? new Date(m.created_at * 1000).toLocaleString('zh-CN') : '-';
             const isFrozen = m.frozen === 1;
@@ -347,7 +349,7 @@
             const freezeBtn = isFrozen
                 ? `<button class="btn btn-sm btn-outline-success me-1" onclick="toggleFreeze(${m.id},0)" title="解冻"><i class="fas fa-unlock"></i></button>`
                 : `<button class="btn btn-sm btn-outline-secondary me-1" onclick="toggleFreeze(${m.id},1)" title="冻结"><i class="fas fa-snowflake"></i></button>`;
-            list.innerHTML += `<tr class="${isFrozen ? 'table-secondary' : ''}">
+            rows.push(`<tr class="${isFrozen ? 'table-secondary' : ''}">
                 <td>${m.id}</td>
                 <td><strong>${escHtml(m.email || m.username)}</strong>${frozenBadge}</td>
                 <td>${getLevelName(m.member_level || 0)}</td>
@@ -361,8 +363,9 @@
                     ${freezeBtn}
                     <button class="btn btn-sm btn-outline-danger js-del-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" title="删除"><i class="fas fa-trash"></i></button>
                 </td>
-            </tr>`;
+            </tr>`);
         });
+        list.innerHTML = rows.join('');
     }
 
     // [安全加固·H1修复] HTML 属性上下文转义（含引号），防止邮箱等用户数据注入 JS 上下文
@@ -394,10 +397,9 @@
         // 等级下拉（与设置等级弹窗同一套配置）
         const sel = document.getElementById('add-level');
         sel.innerHTML = '<option value="0">普通会员</option>';
-        (memberLevelsConfig || []).forEach((lv, i) => {
-            if (!lv) return;
-            sel.innerHTML += `<option value="${i}">${escHtml(lv.name || '等级' + i)}</option>`;
-        });
+        sel.innerHTML += (memberLevelsConfig || []).map((lv, i) =>
+            lv ? `<option value="${i}">${escHtml(lv.name || '等级' + i)}</option>` : ''
+        ).join('');
         new bootstrap.Modal(document.getElementById('addMemberModal')).show();
     }
 
@@ -482,12 +484,12 @@
         txList.innerHTML = '';
         if (data.transactions && data.transactions.length > 0) {
             const typeMap = {recharge:'充值',order_payment:'订单支付',refund:'退款',admin_adjust:'管理员调整'};
-            data.transactions.forEach(t => {
+            txList.innerHTML = data.transactions.map(t => {
                 const color = t.amount >= 0 ? 'text-success' : 'text-danger';
                 const sign = t.amount >= 0 ? '+' : '';
                 const time = t.created_at ? new Date(t.created_at * 1000).toLocaleString('zh-CN') : '-';
-                txList.innerHTML += `<tr><td>${typeMap[t.type]||t.type}</td><td class="${color} fw-bold">${sign}${t.amount.toFixed(2)}</td><td>${escHtml(t.description||'-')}</td><td>${time}</td></tr>`;
-            });
+                return `<tr><td>${typeMap[t.type]||t.type}</td><td class="${color} fw-bold">${sign}${t.amount.toFixed(2)}</td><td>${escHtml(t.description||'-')}</td><td>${time}</td></tr>`;
+            }).join('');
         } else { txList.innerHTML = '<tr><td colspan="4" class="text-center text-muted">暂无记录</td></tr>'; }
 
         // 订单
@@ -496,11 +498,11 @@
         if (data.orders && data.orders.length > 0) {
             const statusMap = {0:'未支付',1:'已支付',2:'已发货',3:'已完成'};
             const statusClass = {0:'bg-warning',1:'bg-info',2:'bg-primary',3:'bg-success'};
-            data.orders.forEach(o => {
+            orderList.innerHTML = data.orders.map(o => {
                 const time = o.created_at ? new Date(o.created_at * 1000).toLocaleString('zh-CN') : '-';
                 const shortId = o.id.substring(0,8) + '...';
-                orderList.innerHTML += `<tr><td><code>${shortId}</code></td><td>${escHtml(o.product_name||'-')}</td><td>¥${parseFloat(o.total_amount).toFixed(2)}</td><td><span class="badge ${statusClass[o.status]||'bg-secondary'}">${statusMap[o.status]||'未知'}</span></td><td>${time}</td></tr>`;
-            });
+                return `<tr><td><code>${shortId}</code></td><td>${escHtml(o.product_name||'-')}</td><td>¥${parseFloat(o.total_amount).toFixed(2)}</td><td><span class="badge ${statusClass[o.status]||'bg-secondary'}">${statusMap[o.status]||'未知'}</span></td><td>${time}</td></tr>`;
+            }).join('');
         } else { orderList.innerHTML = '<tr><td colspan="5" class="text-center text-muted">暂无订单</td></tr>'; }
 
         new bootstrap.Modal(document.getElementById('detailModal')).show();
@@ -532,9 +534,9 @@
         document.getElementById('level-current').innerHTML = getLevelName(currentLevel);
         const sel = document.getElementById('level-select');
         sel.innerHTML = '<option value="0">普通会员</option>';
-        memberLevelsConfig.forEach((lv, i) => {
-            sel.innerHTML += `<option value="${i}" ${currentLevel === i ? 'selected' : ''}>${escHtml(lv.name || '等级' + i)}</option>`;
-        });
+        sel.innerHTML += memberLevelsConfig.map((lv, i) =>
+            `<option value="${i}" ${currentLevel === i ? 'selected' : ''}>${escHtml(lv.name || '等级' + i)}</option>`
+        ).join('');
         new bootstrap.Modal(document.getElementById('levelModal')).show();
     }
 
