@@ -950,6 +950,11 @@ async function ensureMemberTables(db) {
     }
 }
 
+// [新增] 支付网关表兼容初始化：旧库自动补 member_recharge 列（会员充值开关），幂等不报错
+async function ensurePayGatewayColumns(db) {
+    try { await db.prepare('ALTER TABLE pay_gateways ADD COLUMN member_recharge INTEGER DEFAULT 0').run(); } catch(e) {}
+}
+
 async function handleApi(request, env, url, ctx) {
     const method = request.method;
     const path = url.pathname;
@@ -1720,6 +1725,7 @@ async function handleApi(request, env, url, ctx) {
 
             // --- 支付网关 API ---
             if (path === '/api/admin/gateways/list') {
+                 await ensurePayGatewayColumns(db);
                  let { results } = await db.prepare("SELECT * FROM pay_gateways ORDER BY sort DESC, id ASC").all();
                  if (results.length === 0) {
                      const emptyConfig = { app_id: "", private_key: "", alipay_public_key: "" };
@@ -1731,18 +1737,20 @@ async function handleApi(request, env, url, ctx) {
                  return jsonRes(results);
             }
             if (path === '/api/admin/gateway/save' && method === 'POST') {
-                const { id, name, type, config, active, remark, sort } = await request.json();
+                await ensurePayGatewayColumns(db);
+                const { id, name, type, config, active, remark, sort, member_recharge } = await request.json();
                 const safeRemark = remark || null; // 防止 remark 为 undefined 导致数据库崩溃
                 const safeSort = (sort !== undefined && sort !== null && sort !== '') ? parseInt(sort) : 0;
+                const safeMemberRecharge = member_recharge ? 1 : 0; // 会员充值开关
                 
                 if (id) {
                     // 如果存在 ID，则更新旧数据
-                    await db.prepare("UPDATE pay_gateways SET name=?, type=?, config=?, active=?, remark=?, sort=? WHERE id=?")
-                       .bind(name, type, JSON.stringify(config), active, safeRemark, safeSort, id).run();
+                    await db.prepare("UPDATE pay_gateways SET name=?, type=?, config=?, active=?, remark=?, sort=?, member_recharge=? WHERE id=?")
+                       .bind(name, type, JSON.stringify(config), active, safeRemark, safeSort, safeMemberRecharge, id).run();
                 } else {
                     // 如果没有 ID，则插入新数据 (前端自动初始化 4 个 U 网络时会走到这里)
-                    await db.prepare("INSERT INTO pay_gateways (name, type, config, active, remark, sort) VALUES (?, ?, ?, ?, ?, ?)")
-                       .bind(name, type, JSON.stringify(config), active, safeRemark, safeSort).run();
+                    await db.prepare("INSERT INTO pay_gateways (name, type, config, active, remark, sort, member_recharge) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                       .bind(name, type, JSON.stringify(config), active, safeRemark, safeSort, safeMemberRecharge).run();
                 }
                 return jsonRes({success: true});
             }
@@ -2378,8 +2386,13 @@ async function handleApi(request, env, url, ctx) {
         }
        // ====== [开始] 新增代码：获取启用的支付方式 ======
         if (path === '/api/shop/gateways') {
-            // 获取所有 active=1 的支付网关，并取出 ID
-            const { results } = await db.prepare("SELECT id, name, type, config FROM pay_gateways WHERE active = 1 ORDER BY sort DESC, id ASC").all();
+            await ensurePayGatewayColumns(db);
+            // 获取所有 active=1 的支付网关，并取出 ID；for=recharge 时仅返回开启"会员充值"开关的网关
+            const forRecharge = url.searchParams.get('for') === 'recharge';
+            const sql = forRecharge
+                ? "SELECT id, name, type, config FROM pay_gateways WHERE active = 1 AND member_recharge = 1 ORDER BY sort DESC, id ASC"
+                : "SELECT id, name, type, config FROM pay_gateways WHERE active = 1 ORDER BY sort DESC, id ASC";
+            const { results } = await db.prepare(sql).all();
             // 过滤敏感信息，仅返回前端所需的 id, name, type 和自定义 icon
             const gateways = results.map(g => {
                 let icon = '';
@@ -2672,6 +2685,11 @@ async function handleApi(request, env, url, ctx) {
             if (!amount || amount < 1) return errRes('充值金额最低1元');
             if (amount > 10000) return errRes('单次充值不能超过10000元');
             if (!payment_method) return errRes('请选择支付方式');
+            // 校验支付方式必须开启了"会员充值"开关
+            await ensurePayGatewayColumns(db);
+            const rechargeGw = await db.prepare("SELECT id FROM pay_gateways WHERE id=? AND active=1 AND member_recharge=1").bind(payment_method).first()
+                || await db.prepare("SELECT id FROM pay_gateways WHERE type=? AND active=1 AND member_recharge=1").bind(payment_method).first();
+            if (!rechargeGw) return errRes('该支付方式未开启会员充值或不可用');
             const order_id = uuid();
             const now = time();
             const contact = user.email || user.username;

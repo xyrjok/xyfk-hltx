@@ -321,7 +321,7 @@
     // 加载支付方式 (与购买商品同步，使用同一接口)
     async function loadPayMethods() {
         try {
-            const res = await fetch('/api/shop/gateways');
+            const res = await fetch('/api/shop/gateways?for=recharge');
             const gateways = await res.json();
             const container = $('#recharge-pay-methods');
             container.empty();

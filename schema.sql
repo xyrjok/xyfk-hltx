@@ -183,7 +183,8 @@ CREATE TABLE IF NOT EXISTS pay_gateways (
     config TEXT NOT NULL,
     active INTEGER DEFAULT 1,
     remark TEXT,
-    sort INTEGER DEFAULT 0
+    sort INTEGER DEFAULT 0,
+    member_recharge INTEGER DEFAULT 0
 );
 
 -- 11.5 支付网关初始数据

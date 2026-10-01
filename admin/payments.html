@@ -168,6 +168,7 @@
                                 <th style="width: 60px;">排序</th>
                                 <th style="width: 80px;">汇率</th>
                                 <th>状态</th>
+                                <th style="width: 80px;">会员充值</th>
                                 <th>备注</th>
                                 <th style="width: 100px; text-align: center;">操作</th>
                             </tr>
@@ -470,12 +471,12 @@
 
     async function loadGateways() {
         const tbody = document.getElementById('gateway-list');
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center">加载中...</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center">加载中...</td></tr>';
 
         allGateways = await api('gateways/list');
         if (!Array.isArray(allGateways)) { allGateways = []; }
         if (allGateways.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">暂无支付通道，请点击上方按钮自行添加</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无支付通道，请点击上方按钮自行添加</td></tr>';
             return;
         }
         
@@ -486,6 +487,12 @@
                         ${g.active ? 'checked' : ''} 
                         onclick="toggleGatewayStatus(${g.id}, ${g.active ? 0 : 1})">
                 </div>`;
+            const memberRechargeHtml = `
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" role="switch" 
+                        ${g.member_recharge ? 'checked' : ''} 
+                        onclick="toggleMemberRecharge(${g.id}, ${g.member_recharge ? 0 : 1})">
+                </div>`;
             return `
                 <td>${g.id}</td>
                 <td><span class="fw-bold">${g.name}</span></td>
@@ -493,6 +500,7 @@
                 <td class="text-muted">${g.sort || 0}</td>
                 <td class="text-muted">${g.type.startsWith('usdt_') ? (g.config?.exchange_rate || '1') : (g.type === 'yipay' ? ((g.config?.channel_type || g.config?.pay_type || 'alipay') + (String(g.config?.epay_version || '').toLowerCase() === 'v2' ? ' · v2' : ' · v1')) : '-')}</td>
                 <td>${statusHtml}</td>
+                <td>${memberRechargeHtml}</td>
                 <td class="text-muted small">${g.remark || '-'}</td>
                 <td style="text-align: center;">
                     <button class="btn btn-sm btn-outline-primary" onclick="openModal(${g.id})"><i class="fas fa-cog"></i> 配置</button>
@@ -619,6 +627,7 @@
             name: document.getElementById('ali-name').value.trim(),
             type: gateway.type,
             active: gateway.active !== undefined ? gateway.active : 1,
+            member_recharge: gateway.member_recharge ? 1 : 0,
             config: config,
             remark: document.getElementById('gateway-remark').value.trim(),
             sort: document.getElementById('gateway-sort').value || 0
@@ -646,6 +655,7 @@
             // 【修改这行】：强制获取当前输入框的值，允许用户修改网络标识
             type: document.getElementById('usdt-type').value.trim(), 
             active: gateway.active !== undefined ? gateway.active : 1,
+            member_recharge: gateway.member_recharge ? 1 : 0,
             config: config,
             remark: document.getElementById('usdt-gateway-remark').value.trim(),
             sort: document.getElementById('usdt-gateway-sort').value || 0
@@ -701,6 +711,7 @@
             name: document.getElementById('yipay-name').value.trim(),
             type: 'yipay',
             active: gateway.active !== undefined ? gateway.active : 1,
+            member_recharge: gateway.member_recharge ? 1 : 0,
             config: config,
             remark: document.getElementById('yipay-gateway-remark').value.trim(),
             sort: document.getElementById('yipay-gateway-sort').value || 0
@@ -720,6 +731,15 @@
     const res = await api('gateway/save', { 
         method: 'POST', 
         body: JSON.stringify({ ...g, active: newStatus }) 
+    });
+    if (res.success) loadGateways();
+}
+    // [新增] 会员充值开关：控制该支付方式是否出现在会员余额充值的选择列表中
+    async function toggleMemberRecharge(id, newStatus) {
+    const g = allGateways.find(x => x.id === id);
+    const res = await api('gateway/save', { 
+        method: 'POST', 
+        body: JSON.stringify({ ...g, member_recharge: newStatus }) 
     });
     if (res.success) loadGateways();
 }
