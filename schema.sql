@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS products (
     created_at  INTEGER,
     image_url   TEXT,
     tags        TEXT,
-    seo_description TEXT
+    seo_description TEXT,
+    member_price_enabled INTEGER DEFAULT 1
 );
 
 INSERT OR IGNORE INTO products (id, category_id, name, description, sort, active, created_at, image_url, tags, seo_description) VALUES (1, 1, '(AAA老号)GoogleVoice /GV靓号', '<p style="line-height: 1;">发货格式有两种：</p>

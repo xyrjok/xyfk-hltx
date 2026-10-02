@@ -43,9 +43,26 @@ window.showBalanceResult=function(cards,msg){var o=document.createElement('div')
     }
 
     // 3. 显示会员折扣信息
-    fetch('/api/shop/config').then(r=>r.json()).then(config => {
-        if (config.member_discount && parseInt(config.member_discount) < 100) {
-            const discount = parseInt(config.member_discount);
+    // [升级] 会员价 = 会员等级折扣价；商品未开启“会员价”时不显示（与下单结算逻辑一致）
+    Promise.all([
+        fetch('/api/shop/config').then(r=>r.json()).catch(()=>({})),
+        fetch('/api/member/profile', { headers: { 'Authorization': 'Bearer ' + token } }).then(r=>r.json()).catch(()=>({}))
+    ]).then(([config, prof]) => {
+        // 商品级“会员价”开关：关闭则不展示会员价
+        try { if (typeof currentProduct !== 'undefined' && currentProduct && currentProduct.member_price_enabled === 0) return; } catch(e) {}
+        let discount = 0;
+        try {
+            if (config && config.member_enabled === '1') {
+                const levels = JSON.parse(config.member_levels || '[]');
+                const lvl = (prof && prof.user && parseInt(prof.user.member_level)) || 0;
+                if (Array.isArray(levels) && levels[lvl] && levels[lvl].discount) {
+                    const d = parseInt(levels[lvl].discount);
+                    if (d >= 1 && d < 100) discount = d;
+                }
+            }
+        } catch(e) {}
+        if (!discount && config && config.member_discount && parseInt(config.member_discount) < 100) discount = parseInt(config.member_discount);
+        if (discount >= 1 && discount < 100) {
             document.querySelectorAll('.variant-price').forEach(el => {
                 const origPrice = parseFloat(el.dataset.price || el.textContent.replace(/[^0-9.]/g, ''));
                 if (origPrice > 0 && !el.dataset.memberPriced) {

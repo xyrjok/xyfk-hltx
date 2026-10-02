@@ -144,7 +144,7 @@ async function memberAuth(request, env, db) {
     const token = authHeader.substring(7);
     const userId = await verifyToken(token, env);
     if (!userId) return null;
-    const user = await db.prepare('SELECT id, username, email, balance, frozen, created_at, updated_at FROM users WHERE id=?').bind(userId).first();
+    const user = await db.prepare('SELECT id, username, email, balance, frozen, member_level, created_at, updated_at FROM users WHERE id=?').bind(userId).first();
     if (!user) return null;
     if (user.frozen === 1) return null;
     return user;
@@ -967,6 +967,15 @@ async function ensurePayGatewayColumns(db) {
     _payGatewaySchemaEnsured = true;
 }
 
+// [新增] 商品表兼容初始化：旧库自动补 member_price_enabled 列（商品级“会员价”开关，默认开启），幂等不报错
+// [性能优化] 同样每个运行实例只执行一次
+let _productSchemaEnsured = false;
+async function ensureProductColumns(db) {
+    if (_productSchemaEnsured) return;
+    try { await db.prepare('ALTER TABLE products ADD COLUMN member_price_enabled INTEGER DEFAULT 1').run(); } catch(e) {}
+    _productSchemaEnsured = true;
+}
+
 async function handleApi(request, env, url, ctx) {
     const method = request.method;
     const path = url.pathname;
@@ -976,6 +985,10 @@ async function handleApi(request, env, url, ctx) {
         // [新增] 会员相关请求先确保表结构完整（旧库缺表/缺列会导致 500）
         if (path.startsWith('/api/member') || path.startsWith('/api/admin/member') || path === '/api/admin/members/list') {
             await ensureMemberTables(db);
+        }
+        // [新增] 商品/下单相关请求先确保商品表结构完整（旧库缺 member_price_enabled 列会导致 500）
+        if (path.startsWith('/api/admin/product') || path.startsWith('/api/shop/product') || path === '/api/shop/order/create' || path === '/api/shop/cart/checkout') {
+            await ensureProductColumns(db);
         }
         // ===========================
         // --- 管理员 API (Admin) ---
@@ -1152,19 +1165,29 @@ async function handleApi(request, env, url, ctx) {
                 return jsonRes(products);
             }
             
+            // [新增] 商品级“会员价”开关（列表内快捷切换，默认开启；关闭后本商品不参与会员折扣）
+            if (path === '/api/admin/product/member_price' && method === 'POST') {
+                const { id, enabled } = await request.json();
+                if (!id) return errRes('缺少商品ID');
+                const memberPriceVal = enabled ? 1 : 0;
+                await db.prepare("UPDATE products SET member_price_enabled=? WHERE id=?").bind(memberPriceVal, id).run();
+                return jsonRes({ success: true, member_price_enabled: memberPriceVal });
+            }
+
             // 商品保存逻辑 (含 tags 支持)
             if (path === '/api/admin/product/save' && method === 'POST') {
                 const data = await request.json();
                 let productId = data.id;
                 const now = time();
 
-                // 1. 保存主商品 (增加 tags 和 seo_description 字段)
+                // 1. 保存主商品 (增加 tags / seo_description / member_price_enabled 字段)
+                const memberPriceEnabled = data.member_price_enabled === 0 ? 0 : 1; // 默认开启会员价
                 if (productId) {
-                    await db.prepare("UPDATE products SET name=?, description=?, category_id=?, sort=?, active=?, image_url=?, tags=?, seo_description=? WHERE id=?")
-                        .bind(data.name, data.description, data.category_id, data.sort, data.active, data.image_url, data.tags, data.seo_description, productId).run();
+                    await db.prepare("UPDATE products SET name=?, description=?, category_id=?, sort=?, active=?, image_url=?, tags=?, seo_description=?, member_price_enabled=? WHERE id=?")
+                        .bind(data.name, data.description, data.category_id, data.sort, data.active, data.image_url, data.tags, data.seo_description, memberPriceEnabled, productId).run();
                 } else {
-                    const res = await db.prepare("INSERT INTO products (category_id, sort, active, created_at, name, description, image_url, tags, seo_description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                        .bind(data.category_id, data.sort, data.active, now, data.name, data.description, data.image_url, data.tags, data.seo_description).run();
+                    const res = await db.prepare("INSERT INTO products (category_id, sort, active, created_at, name, description, image_url, tags, seo_description, member_price_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        .bind(data.category_id, data.sort, data.active, now, data.name, data.description, data.image_url, data.tags, data.seo_description, memberPriceEnabled).run();
                     productId = res.meta.last_row_id;
                 }
 
@@ -1263,6 +1286,7 @@ async function handleApi(request, env, url, ctx) {
                         image_url: p.image_url || '',
                         tags: p.tags || '',
                         seo_description: p.seo_description || '',
+                        member_price_enabled: p.member_price_enabled === 0 ? 0 : 1,
                         variants: variants.map(v => {
                             // 批发配置在库中是 JSON 字符串，导出时还原成数组便于阅读，导入时会自动序列化回去
                             let wholesale = null;
@@ -1405,6 +1429,7 @@ async function handleApi(request, env, url, ctx) {
                         image_url: p.image_url || '',
                         tags: p.tags || '',
                         seo_description: p.seo_description || '',
+                        member_price_enabled: p.member_price_enabled === 0 ? 0 : 1,
                         variants: Array.isArray(p.variants) ? p.variants : []
                     });
                 }
@@ -1412,8 +1437,8 @@ async function handleApi(request, env, url, ctx) {
                 // 4.1 批量插入商品
                 for (let i = 0; i < pending.length; i += 50) {
                     const chunk = pending.slice(i, i + 50);
-                    const stmts = chunk.map(x => db.prepare("INSERT INTO products (category_id, sort, active, created_at, name, description, image_url, tags, seo_description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                        .bind(x.categoryId, x.sort, x.active, x.created_at, x.name, x.description, x.image_url, x.tags, x.seo_description));
+                    const stmts = chunk.map(x => db.prepare("INSERT INTO products (category_id, sort, active, created_at, name, description, image_url, tags, seo_description, member_price_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        .bind(x.categoryId, x.sort, x.active, x.created_at, x.name, x.description, x.image_url, x.tags, x.seo_description, x.member_price_enabled));
                     const batchRes = await db.batch(stmts);
                     batchRes.forEach((r, idx) => {
                         const newId = r.meta.last_row_id;
@@ -3069,7 +3094,7 @@ async function handleApi(request, env, url, ctx) {
                 if (stock < finalQuantity) return errRes('库存不足');
             }
 
-            const product = await db.prepare("SELECT name FROM products WHERE id=?").bind(variant.product_id).first();
+            const product = await db.prepare("SELECT name, member_price_enabled FROM products WHERE id=?").bind(variant.product_id).first();
             const order_id = uuid();
             
             // === 价格计算 ===
@@ -3098,9 +3123,10 @@ async function handleApi(request, env, url, ctx) {
             let cardsSentPlaceholder = null;
             if (card_id) cardsSentPlaceholder = JSON.stringify({ target_id: card_id });
 
-            // 记录原价，再应用会员折扣
+            // 记录原价，再应用会员折扣（商品未开启“会员价”时不享受折扣）
             const originalPrice = finalPrice;
-            if (memberDiscount < 100) {
+            const memberPriceOn = !product || product.member_price_enabled !== 0;
+            if (memberDiscount < 100 && memberPriceOn) {
                 finalPrice = Math.round(finalPrice * memberDiscount / 100 * 100) / 100;
             }
 
@@ -3111,7 +3137,7 @@ async function handleApi(request, env, url, ctx) {
                 .bind(order_id, variant_id, product.name, variant.name, finalPrice, finalQuantity, total_amount, finalContact, finalPassword, payment_method, time(), cardsSentPlaceholder, orderUserId).run();
 
             // 返回会员折扣信息给前端
-            const discountInfo = memberDiscount < 100 ? { member_discount: memberDiscount, original_price: parseFloat((originalPrice * finalQuantity).toFixed(2)) } : null;
+            const discountInfo = (memberDiscount < 100 && memberPriceOn) ? { member_discount: memberDiscount, original_price: parseFloat((originalPrice * finalQuantity).toFixed(2)) } : null;
             return jsonRes({ order_id, total_amount, payment_method, discount: discountInfo });
         }
 
@@ -3197,7 +3223,7 @@ async function handleApi(request, env, url, ctx) {
                 // 注意：前端 cart-page.js 已修复为传 variantId
                 const variant = await db.prepare("SELECT * FROM variants WHERE id=?").bind(item.variantId).first();
                 if (!variant) throw new Error('商品规格不存在');
-                const product = await db.prepare("SELECT name FROM products WHERE id=?").bind(variant.product_id).first();
+                const product = await db.prepare("SELECT name, member_price_enabled FROM products WHERE id=?").bind(variant.product_id).first();
 
                 let stock = 0;
                 let finalPrice = variant.price; // 从数据库重新计算
@@ -3250,19 +3276,23 @@ async function handleApi(request, env, url, ctx) {
                     price: finalPrice, // 使用后端计算的单价
                     buyMode: item.buyMode,
                     selectedCardId: item.selectedCardId,
-                    auto_delivery: variant.auto_delivery // 存储发货类型
+                    auto_delivery: variant.auto_delivery, // 存储发货类型
+                    memberPriceEnabled: !product || product.member_price_enabled !== 0 // 商品级会员价开关（仅用于折扣计算，不入库）
                 });
             }
 
             // 获取会员 user_id 并应用会员折扣
             // (已在上方提前检测)
 
-            // 应用会员折扣
+            // 应用会员折扣（未开启“会员价”的商品不享受折扣）
             if (memberDiscount < 100) {
                 for (const vi of validatedItems) {
-                    vi.price = Math.round(vi.price * memberDiscount / 100 * 100) / 100;
+                    if (vi.memberPriceEnabled) vi.price = Math.round(vi.price * memberDiscount / 100 * 100) / 100;
+                    delete vi.memberPriceEnabled;
                 }
                 total_amount = validatedItems.reduce((sum, vi) => sum + vi.price * vi.quantity, 0);
+            } else {
+                for (const vi of validatedItems) delete vi.memberPriceEnabled;
             }
 
             if (total_amount <= 0.01) return errRes('金额必须大于 0.01');

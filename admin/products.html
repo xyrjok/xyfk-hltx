@@ -226,6 +226,7 @@
                                 <th style="width: 80px; text-align: center;">总库存</th>
                                 <th style="width: 80px; text-align: center;">排序</th>
                                 <th style="width: 80px; text-align: center;">状态</th>
+                                <th style="width: 160px; text-align: center;" class="text-nowrap">会员价 / 开关</th>
                                 <th style="width: 110px; text-align: center;" class="text-nowrap">操作</th>
                             </tr>
                         </thead>
@@ -277,6 +278,11 @@
                     <div class="mb-3 form-check form-switch">
                         <input class="form-check-input" type="checkbox" id="p-active" checked>
                         <label class="form-check-label" for="p-active">上架销售</label>
+                    </div>
+
+                    <div class="mb-3 form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="p-member-price" checked>
+                        <label class="form-check-label" for="p-member-price">启用会员价 <small class="text-muted">(关闭后本商品不参与会员折扣，会员按原价购买；默认开启)</small></label>
                     </div>
                 </form>
                 
@@ -385,14 +391,58 @@
     // 页面逻辑
     let allProducts = [];
     let allCategories = [];
+    let memberLevelsData = [];
     const modal = new bootstrap.Modal(document.getElementById('editModal'));
+
+    // 读取会员等级折扣配置（用于列表内展示会员价）
+    async function loadMemberLevels() {
+        try {
+            const res = await fetch('/api/shop/config');
+            const cfg = await res.json();
+            memberLevelsData = JSON.parse(cfg.member_levels || '[]');
+            if (!Array.isArray(memberLevelsData)) memberLevelsData = [];
+        } catch(e) { memberLevelsData = []; }
+    }
+
+    // 计算并生成商品的“会员价”展示（按各会员等级折扣计算售价区间）
+    function memberPriceHtml(p) {
+        if (p.member_price_enabled === 0) return '<span class="text-muted small">已关闭</span>';
+        const prices = (p.variants || []).map(v => parseFloat(v.price) || 0);
+        if (prices.length === 0) return '<span class="text-muted small">—</span>';
+        const levels = memberLevelsData.filter(l => l && parseInt(l.discount) >= 1 && parseInt(l.discount) < 100);
+        if (levels.length === 0) return '<span class="text-muted small">未配置折扣</span>';
+        const lo = Math.min(...prices), hi = Math.max(...prices);
+        return levels.map(l => {
+            const d = parseInt(l.discount);
+            const mlo = (lo * d / 100).toFixed(2), mhi = (hi * d / 100).toFixed(2);
+            const range = mlo === mhi ? '¥' + mlo : '¥' + mlo + '~' + mhi;
+            return `<div class="small text-danger text-nowrap">${l.name || '会员'} ${d / 10}折 ${range}</div>`;
+        }).join('');
+    }
+
+    // 列表内快捷切换商品“会员价”开关
+    async function toggleMemberPrice(id, el) {
+        const enabled = el.checked;
+        el.disabled = true;
+        const res = await api('product/member_price', { method: 'POST', body: JSON.stringify({ id, enabled }) });
+        el.disabled = false;
+        if (res && res.success) {
+            const p = allProducts.find(x => x.id === id);
+            if (p) p.member_price_enabled = enabled ? 1 : 0;
+            const cell = el.closest('td').querySelector('.member-price-info');
+            if (cell && p) cell.innerHTML = memberPriceHtml(p);
+        } else {
+            el.checked = !enabled;
+            alert('保存失败: ' + ((res && res.error) || '未知错误'));
+        }
+    }
 
     async function loadData() {
         const tbody = document.getElementById('p-list');
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center">加载中...</td></tr>';
-        [allProducts, allCategories] = await Promise.all([ api('products/list'), api('categories/list') ]);
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center">加载中...</td></tr>';
+        [allProducts, allCategories] = await Promise.all([ api('products/list'), api('categories/list'), loadMemberLevels() ]);
         if (!allProducts || allProducts.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="8" class="text-center">暂无商品</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center">暂无商品</td></tr>';
             return;
         }
         tbody.innerHTML = allProducts.map(p => {
@@ -409,6 +459,12 @@
                 <td class="text-center">${stockHtml}</td>
                 <td class="text-center">${p.sort}</td>
                 <td class="text-center"><span class="badge bg-${p.active ? 'success' : 'secondary'}">${p.active ? '上架' : '下架'}</span></td>
+                <td class="text-center">
+                    <div class="form-check form-switch d-flex justify-content-center mb-1">
+                        <input class="form-check-input" type="checkbox" ${p.member_price_enabled !== 0 ? 'checked' : ''} onchange="toggleMemberPrice(${p.id}, this)" title="开启/关闭本商品会员价">
+                    </div>
+                    <div class="member-price-info">${memberPriceHtml(p)}</div>
+                </td>
                 <td class="text-center">
                     <button class="btn btn-sm btn-outline-primary" onclick="openModal(${p.id})" title="编辑"><i class="fas fa-edit"></i></button>
                     <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteProduct(${p.id})" title="删除"><i class="fas fa-trash"></i></button>
@@ -457,7 +513,7 @@
     }
 
     function openModal(id = null) {
-        const p = allProducts.find(x => x.id === id) || { name:'', description:'', seo_description: '', sort:0, active:1, category_id: 1, variants:[{}], tags: '' };
+        const p = allProducts.find(x => x.id === id) || { name:'', description:'', seo_description: '', sort:0, active:1, member_price_enabled:1, category_id: 1, variants:[{}], tags: '' };
         document.getElementById('p-id').value = p.id || '';
         document.getElementById('p-name').value = p.name;
         document.getElementById('p-sort').value = p.sort;
@@ -465,6 +521,7 @@
         document.getElementById('p-seo-desc').value = p.seo_description || '';
         document.getElementById('p-tags').value = p.tags || '';
         document.getElementById('p-active').checked = !!p.active;
+        document.getElementById('p-member-price').checked = p.member_price_enabled !== 0;
         
         // --- 核心修改：设置编辑器内容 ---
         const descContent = p.description || '';
@@ -603,6 +660,7 @@
             description: descContent, // 使用获取到的富文本内容
             sort: parseInt(document.getElementById('p-sort').value) || 0,
             active: document.getElementById('p-active').checked ? 1 : 0,
+            member_price_enabled: document.getElementById('p-member-price').checked ? 1 : 0,
             category_id: document.getElementById('p-category').value,
             image_url: document.getElementById('p-image').value,
             seo_description: seoDescValue,
