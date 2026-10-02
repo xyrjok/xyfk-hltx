@@ -545,23 +545,27 @@ async function serveLoginHtml(env, url, assetPath) {
         if (ct && ct.indexOf('text/html') === -1) return resp;
         let html = await resp.text();
         let headerInner = '';
-        let preload = '';
+        let headInject = '';
         try {
             const db = env.xyfk;
-            const rows = await db.prepare("SELECT key, value FROM site_config WHERE key IN ('site_logo','site_name')").all();
+            const rows = await db.prepare("SELECT key, value FROM site_config WHERE key IN ('site_logo','site_name','member_enabled')").all();
             const c = {};
             if (rows && rows.results) rows.results.forEach(r => { c[r.key] = r.value; });
             const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             if (c.site_logo) {
                 headerInner = '<img id="site-logo" src="' + esc(c.site_logo) + '" alt="Logo" style="max-height: 47px; max-width: 100%;">';
-                preload = '<link rel="preload" as="image" href="' + esc(c.site_logo) + '">';
+                headInject += '<link rel="preload" as="image" href="' + esc(c.site_logo) + '">';
             } else {
                 const fallback = (assetPath.indexOf('/member/') === 0) ? '会员中心' : 'XYRJFK后台登录';
                 headerInner = '<h1 style="margin: 0; font-size: 24px; color: #333;">' + esc(c.site_name || fallback) + '</h1>';
             }
+            // 会员登录页：注册被后台关闭时，服务端直接渲染正确初始可见性，消除“先闪出注册/后隐藏”的抖动
+            if (assetPath.indexOf('/member/') === 0 && c.member_enabled !== '1') {
+                headInject += '<style>#register-tab{display:none!important}#reg-closed-notice{display:block!important}</style>';
+            }
         } catch (e) { /* 读取配置失败：保留占位符，交由前端 JS 兜底渲染 */ }
         if (headerInner) html = html.split('<!--XYRJ_LOGIN_HEADER-->').join(headerInner);
-        if (preload) html = html.replace('</head>', preload + '</head>');
+        if (headInject) html = html.replace('</head>', headInject + '</head>');
         return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' } });
     } catch (e) {
         try { return await fetchAsset(); } catch (e2) { return new Response('Internal Error', { status: 500 }); }
