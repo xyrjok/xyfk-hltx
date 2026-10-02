@@ -122,7 +122,7 @@
                 <li><a href="#" class="active" data-section="orders"><i class="fas fa-shopping-bag"></i> 我的订单</a></li>
                 <li><a href="#" data-section="recharge"><i class="fas fa-wallet"></i> 余额充值</a></li>
                 <li><a href="#" data-section="transactions"><i class="fas fa-history"></i> 交易记录</a></li>
-                <li><a href="#" data-section="password"><i class="fas fa-user"></i> 会员资料</a></li>
+                <li><a href="#" data-section="password"><i class="fas fa-key"></i> 修改密码</a></li>
                 <li><a href="/" class="logout-btn"><i class="fas fa-home"></i> 返回首页</a></li>
                 <li><a href="javascript:void(0)" class="logout-btn" onclick="logout()"><i class="fas fa-sign-out-alt"></i> 退出登录</a></li>
             </ul>
@@ -224,21 +224,9 @@
             </div>
         </div>
 
-        <!-- 会员资料（含修改密码） -->
+        <!-- 修改密码 -->
         <div class="info-card section-content" id="section-password" style="display:none;">
-            <div class="card-heading"><i class="fas fa-user me-2"></i>会员资料</div>
-            <div style="max-width: 400px;">
-                <div class="mb-3">
-                    <label class="form-label">邮箱</label>
-                    <input type="text" class="form-control" id="profile-email" readonly>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label">会员等级</label>
-                    <div class="pt-1"><span id="profile-level" class="badge bg-secondary">加载中...</span></div>
-                </div>
-            </div>
-            <hr class="my-4">
-            <div class="card-heading" style="font-size: 15px;"><i class="fas fa-key me-2"></i>修改密码</div>
+            <div class="card-heading"><i class="fas fa-key me-2"></i>修改密码</div>
             <div style="max-width: 400px;">
                 <div class="mb-3">
                     <label class="form-label">原密码</label>
@@ -280,26 +268,10 @@
             if (data.user) {
                 $('#user-balance').text(data.user.balance.toFixed(2));
                 $('#user-info-footer').text(data.user.email || data.user.username);
-                // [新增] 会员资料：邮箱 + 等级
-                $('#profile-email').val(data.user.email || data.user.username || '-');
-                renderProfileLevel(parseInt(data.user.member_level) || 0);
                 localStorage.setItem(USER_KEY, JSON.stringify(data.user));
                 document.body.style.display = 'block';
             }
         } catch(e) { document.body.style.display = 'block'; console.error('loadProfile error', e); }
-    }
-
-    // 会员资料：等级名称（等级 = member_levels 数组下标，与折扣解析同一口径）
-    async function renderProfileLevel(level) {
-        let name = null;
-        try {
-            const res = await fetch('/api/shop/config');
-            const cfg = await res.json();
-            const levels = JSON.parse(cfg.member_levels || '[]');
-            const lv = levels[level] || null;
-            if (lv && lv.name) name = lv.name;
-        } catch(e) {}
-        $('#profile-level').text(name || (level > 0 ? '等级' + level : '普通会员'));
     }
 
     // 加载订单
