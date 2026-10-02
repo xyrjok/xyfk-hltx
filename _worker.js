@@ -999,17 +999,24 @@ async function resolveMemberDiscount(db, memberLevel) {
 // [统一口径] 为商品/规格附加预计算会员价（仅会员请求时调用）。
 // 所有折扣/取整运算只发生在后端，前端只做“选择 + 展示”：
 //   product.member_discount     = 折扣百分比（商品关闭会员价时也返回，便于前端提示）
-//   variant.member_price        = 基准会员价
+//   variant.member_price        = 基准会员价（原价 × 折扣）
 //   variant.member_price_select = 自选加价后的会员价（custom_markup > 0 时）
 //   variant.member_wholesale    = 各批发档位的会员价 [{qty, price}]（与结算同口径 {qty, price}）
+//
+// [取低者] 会员折扣价 与 批发价 取较低者，不再叠加（即不再“批发价再打折”）：
+//   最终单价 = min(原价 × 折扣, 数量命中的批发档位价)
+//   三处（展示 / 单买结算 / 购物车结算）共用此口径，避免漂移。
 function attachMemberPricing(product, variants, discount) {
     if (!(discount >= 1 && discount < 100)) return;
     product.member_discount = discount;
     if (product.member_price_enabled === 0) return;
     for (const v of variants) {
         const base = parseFloat(v.price) || 0;
-        v.member_price = Math.round(base * discount / 100 * 100) / 100;
+        // 会员折扣价（未取整），用于与批发档位价“取低者”比较
+        const memberRaw = base * discount / 100;
+        v.member_price = Math.round(memberRaw * 100) / 100;
         const markup = parseFloat(v.custom_markup || 0);
+        // 自选模式本就不吃批发价，维持“自选价 × 折扣”
         if (markup > 0) v.member_price_select = Math.round((base + markup) * discount / 100 * 100) / 100;
         if (v.wholesale_config) {
             let wc = v.wholesale_config;
@@ -1017,7 +1024,9 @@ function attachMemberPricing(product, variants, discount) {
             if (Array.isArray(wc)) {
                 v.member_wholesale = wc.map(r => {
                     const qty = parseInt(r.qty), price = parseFloat(r.price);
-                    return (qty > 0 && !isNaN(price)) ? { qty, price: Math.round(price * discount / 100 * 100) / 100 } : null;
+                    if (!(qty > 0) || isNaN(price)) return null;
+                    // [取低者] 批发档位价 与 会员折扣价 取低，先比未取整值再取两位小数
+                    return { qty, price: Math.round(Math.min(price, memberRaw) * 100) / 100 };
                 }).filter(Boolean);
             }
         }
@@ -3144,11 +3153,15 @@ async function handleApi(request, env, url, ctx) {
             const order_id = uuid();
             
             // === 价格计算 ===
-            let finalPrice = variant.price;
+            // [取低者] 会员折扣价 与 批发价 取较低者，不再叠加（不再“批发价再打折”）：
+            //   basePrice = 参与会员折扣的基准价（自选模式含 custom_markup）
+            //   listPrice = 未打折价（命中批发档位时为档位价，否则为基准价）
+            let basePrice = variant.price;
+            let listPrice = variant.price;
             
             if (card_id) {
-                // 1. 自选模式：基础价 + 加价 (忽略批发价)
-                if (variant.custom_markup > 0) finalPrice += variant.custom_markup;
+                // 1. 自选模式：基础价 + 加价 (忽略批发价；自选不吃批发价，故维持“自选价 × 折扣”)
+                if (variant.custom_markup > 0) { basePrice += variant.custom_markup; listPrice += variant.custom_markup; }
             } else {
                 // 2. 随机模式：应用批发价
                 if (variant.wholesale_config) {
@@ -3157,7 +3170,7 @@ async function handleApi(request, env, url, ctx) {
                         wholesaleConfig.sort((a, b) => b.qty - a.qty);
                         for (const rule of wholesaleConfig) {
                             if (finalQuantity >= rule.qty) {
-                                finalPrice = rule.price; 
+                                listPrice = rule.price;
                                 break;
                             }
                         }
@@ -3169,11 +3182,15 @@ async function handleApi(request, env, url, ctx) {
             let cardsSentPlaceholder = null;
             if (card_id) cardsSentPlaceholder = JSON.stringify({ target_id: card_id });
 
-            // 记录原价，再应用会员折扣（商品未开启“会员价”时不享受折扣）
-            const originalPrice = finalPrice;
+            // 记录未打折价，再与会员折扣价“取低者”（商品未开启“会员价”时不享受折扣）
+            const originalPrice = listPrice;
             const memberPriceOn = !product || product.member_price_enabled !== 0;
+            let finalPrice;
             if (memberDiscount < 100 && memberPriceOn) {
-                finalPrice = Math.round(finalPrice * memberDiscount / 100 * 100) / 100;
+                // [取低者] 会员折扣价 = basePrice × 折扣；与 批发/自选价 listPrice 取低，不叠加
+                finalPrice = Math.round(Math.min(listPrice, basePrice * memberDiscount / 100) * 100) / 100;
+            } else {
+                finalPrice = listPrice;
             }
 
             const total_amount = (finalPrice * finalQuantity).toFixed(2);
@@ -3260,7 +3277,9 @@ async function handleApi(request, env, url, ctx) {
                 const product = await db.prepare("SELECT name, member_price_enabled FROM products WHERE id=?").bind(variant.product_id).first();
 
                 let stock = 0;
-                let finalPrice = variant.price; // 从数据库重新计算
+                // [取低者] basePrice = 参与会员折扣的基准价；listPrice = 未打折价（批发档位价或基准价）
+                let basePrice = variant.price;
+                let listPrice = variant.price; // 从数据库重新计算
 
                 if (item.buyMode === 'select' && item.selectedCardId) {
                     // 1. 自选模式
@@ -3270,9 +3289,10 @@ async function handleApi(request, env, url, ctx) {
                     if (!targetCard) throw new Error(`商品 ${item.variantName} 的自选号码已被抢走`);
                     stock = 1; // 足够
                     
-                    // 重新计算自选价格
-                    finalPrice = variant.price;
-                    if (variant.custom_markup > 0) finalPrice += variant.custom_markup;
+                    // 重新计算自选价格（自选不吃批发价，故维持“自选价 × 折扣”）
+                    basePrice = variant.price;
+                    listPrice = variant.price;
+                    if (variant.custom_markup > 0) { basePrice += variant.custom_markup; listPrice += variant.custom_markup; }
                     
                 } else {
                     // 2. 随机/手动 模式
@@ -3283,15 +3303,15 @@ async function handleApi(request, env, url, ctx) {
                     }
                     if (stock < item.quantity) throw new Error(`商品 ${item.variantName} 库存不足 (仅剩 ${stock} 件)`);
                     
-                    // 2b. 重新计算批发价 (仅随机模式)
-                    finalPrice = variant.price;
+                    // 2b. 重新计算批发价 (仅随机模式) —— 只改 listPrice，basePrice 保持原价供会员折扣比较
+                    listPrice = variant.price;
                     if (variant.wholesale_config) {
                         try {
                             const wholesaleConfig = JSON.parse(variant.wholesale_config);
                             wholesaleConfig.sort((a, b) => b.qty - a.qty);
                             for (const rule of wholesaleConfig) {
                                 if (item.quantity >= rule.qty) {
-                                    finalPrice = rule.price; 
+                                    listPrice = rule.price;
                                     break;
                                 }
                             }
@@ -3299,7 +3319,7 @@ async function handleApi(request, env, url, ctx) {
                     }
                 }
                 
-                total_amount += (finalPrice * item.quantity);
+                total_amount += (listPrice * item.quantity);
                 
                 // 存储验证后的信息
                 validatedItems.push({
@@ -3307,7 +3327,8 @@ async function handleApi(request, env, url, ctx) {
                     productName: product ? product.name : '未知商品',
                     variantName: variant.name,
                     quantity: item.quantity,
-                    price: finalPrice, // 使用后端计算的单价
+                    price: listPrice, // 使用后端计算的单价（未打折价）
+                    memberBase: basePrice, // 参与会员折扣的基准价（仅用于取低者比较，不入库）
                     buyMode: item.buyMode,
                     selectedCardId: item.selectedCardId,
                     auto_delivery: variant.auto_delivery, // 存储发货类型
@@ -3319,19 +3340,25 @@ async function handleApi(request, env, url, ctx) {
             // (已在上方提前检测)
 
             // 应用会员折扣（未开启“会员价”的商品不享受折扣）
+            // [取低者] 会员折扣价 = memberBase × 折扣；与 未打折价 vi.price 取低，不叠加
             let anyDiscounted = false;
             let originalTotal = 0;
             if (memberDiscount < 100) {
                 for (const vi of validatedItems) {
                     originalTotal += vi.price * vi.quantity;
-                    if (vi.memberPriceEnabled) { vi.price = Math.round(vi.price * memberDiscount / 100 * 100) / 100; anyDiscounted = true; }
+                    if (vi.memberPriceEnabled) {
+                        vi.price = Math.round(Math.min(vi.price, vi.memberBase * memberDiscount / 100) * 100) / 100;
+                        anyDiscounted = true;
+                    }
                     delete vi.memberPriceEnabled;
+                    delete vi.memberBase; // 不随 cards_sent 入库
                 }
                 total_amount = validatedItems.reduce((sum, vi) => sum + vi.price * vi.quantity, 0);
             } else {
                 for (const vi of validatedItems) {
                     originalTotal += vi.price * vi.quantity;
                     delete vi.memberPriceEnabled;
+                    delete vi.memberBase; // 不随 cards_sent 入库
                 }
             }
 
