@@ -138,6 +138,11 @@
                 <div class="bg-primary text-white card-box">
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
+                            <!-- [新增] 会员邮箱 + 等级（在"可用余额"上方） -->
+                            <div style="font-size: 13px; opacity: .92; margin-bottom: 2px;">
+                                <i class="fas fa-user me-1"></i><span id="profile-email">-</span>
+                                <span id="profile-level" class="badge bg-light text-primary ms-2" style="font-size: 11px;">-</span>
+                            </div>
                             <div class="card-title">可用余额</div>
                             <div class="card-number">¥ <span id="user-balance">0.00</span></div>
                         </div>
@@ -268,10 +273,26 @@
             if (data.user) {
                 $('#user-balance').text(data.user.balance.toFixed(2));
                 $('#user-info-footer').text(data.user.email || data.user.username);
+                // [新增] 余额卡片上方显示会员邮箱 + 等级
+                $('#profile-email').text(data.user.email || data.user.username || '-');
+                renderProfileLevel(parseInt(data.user.member_level) || 0);
                 localStorage.setItem(USER_KEY, JSON.stringify(data.user));
                 document.body.style.display = 'block';
             }
         } catch(e) { document.body.style.display = 'block'; console.error('loadProfile error', e); }
+    }
+
+    // 等级名称（等级 = member_levels 数组下标，与折扣解析同一口径）
+    async function renderProfileLevel(level) {
+        let name = null;
+        try {
+            const res = await fetch('/api/shop/config');
+            const cfg = await res.json();
+            const levels = JSON.parse(cfg.member_levels || '[]');
+            const lv = levels[level] || null;
+            if (lv && lv.name) name = lv.name;
+        } catch(e) {}
+        $('#profile-level').text(name || (level > 0 ? '等级' + level : '普通会员'));
     }
 
     // 加载订单
