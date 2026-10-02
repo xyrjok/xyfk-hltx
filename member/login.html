@@ -10,18 +10,18 @@
         #login-wrapper {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background-color: #f5f5f5;
-            display: flex; justify-content: center; align-items: center;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
             z-index: 1000;
         }
         .login-container {
             width: 100%; max-width: 380px; box-sizing: border-box; padding: 40px;
             background-color: #fff; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-            border-radius: 8px; text-align: center;
+            border-radius: 8px; text-align: center; margin: 0 16px;
         }
-        .login-header { margin-bottom: 10px; }
-        .form-group { margin-bottom: 20px; text-align: left; }
+        .login-header { margin-bottom: 15px; }
+        .form-group { margin-bottom: 15px; text-align: left; }
         .form-control {
-            display: block; width: 100%; padding: 10px 12px; font-size: 14px;
+            display: block; width: 100%; padding: 6px 12px; font-size: 14px;
             line-height: 1.42857143; color: #555; background-color: #fff;
             background-image: none; border: 1px solid #ccc; border-radius: 4px;
             box-shadow: inset 0 1px 1px rgba(0,0,0,.075);
@@ -29,24 +29,27 @@
             box-sizing: border-box;
         }
         .form-control:focus { border-color: #66afe9; outline: 0; box-shadow: inset 0 1px 1px rgba(0,0,0,.075), 0 0 8px rgba(102,175,233,.6); }
-        .xyrj-primary { color: #fff; background-color: #409EFF; border: none; }
+        .xyrj-primary { color: #fff; background-color: #409EFF; }
         .xyrj-primary:hover { background-color: #3390ff; color: #fff; }
         .xyrj-login {
-            width: 100%; padding: 8px 12px; font-size: 16px; border-radius: 4px; cursor: pointer;
+            width: 100%; padding: 6px 12px; font-size: 14px; line-height: 1.42857143;
+            border: 1px solid transparent; border-radius: 4px; cursor: pointer;
             transition: background-color 0.3s;
         }
-        .auth-tabs { display: flex; margin-bottom: 20px; border-bottom: 2px solid #eee; }
+        .auth-tabs { display: flex; margin-bottom: 15px; border-bottom: 2px solid #eee; }
         .auth-tab { flex: 1; text-align: center; padding: 10px 0; cursor: pointer; font-size: 15px; font-weight: 600; color: #999; transition: all 0.3s; border-bottom: 2px solid transparent; margin-bottom: -2px; }
         .auth-tab.active { color: #409EFF; border-bottom-color: #409EFF; }
         .auth-form { display: none; }
         .auth-form.active { display: block; }
-        .footer-link { margin-top: 20px; font-size: 13px; color: #777; }
+        .footer-link { margin-top: 16px; text-align: right; font-size: 13px; color: #777; }
         .footer-link a { color: #409EFF; text-decoration: none; }
+        /* [新增] 登录框底部标语（原“完全免费博客”→“Powered by XYRJ-Faka”） */
+        .login-tagline { text-align: center; color: #686a69ba; font-size: 13px; margin: 38px 16px; }
         .form-group .error-tip { font-size: 12px; color: #f56c6c; margin-top: 4px; display: none; }
         .captcha-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         .captcha-row input { width: 55%; }
         .captcha-img-box {
-            width: 40%; height: 42px; cursor: pointer; border-radius: 4px;
+            width: 40%; height: 34px; cursor: pointer; border-radius: 4px;
             overflow: hidden; display: flex; align-items: center; justify-content: center;
             background: #f4f6f8; border: 1px solid #ddd;
         }
@@ -105,8 +108,10 @@
             <button type="submit" class="xyrj-primary xyrj-login" id="reg-btn">注 册</button>
         </form>
 
-        <div class="footer-link">Powered by XYRJ-Faka</div>
+        <div class="footer-link"><a href="/">&larr; 返回商城首页</a></div>
     </div>
+    <!-- [新增] 底部标语（原“这是一个基于 Cloudflare 搭建的完全免费博客！”） -->
+    <div class="login-tagline">Powered by XYRJ-Faka</div>
 </div>
 
 <script src="/assets/jquery-3.6.0.min.js"></script>

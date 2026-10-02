@@ -10,33 +10,36 @@
         #login-wrapper {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background-color: #f5f5f5;
-            display: flex; justify-content: center; align-items: center;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
             z-index: 1000;
         }
         .login-container {
             width: 100%; max-width: 380px; box-sizing: border-box; padding: 40px;
             background-color: #fff; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-            border-radius: 8px; text-align: center;
+            border-radius: 8px; text-align: center; margin: 0 16px;
         }
-        .login-header { margin-bottom: 10px; }
+        .login-header { margin-bottom: 15px; }
         .login-header h1 { margin: 0; font-size: 24px; color: #333; }
-        .form-group { margin-bottom: 20px; text-align: left; }
+        .form-group { margin-bottom: 15px; text-align: left; }
         .form-control {
-            display: block; width: 100%; padding: 10px 12px; font-size: 14px;
+            display: block; width: 100%; padding: 6px 12px; font-size: 14px;
             line-height: 1.42857143; color: #555; background-color: #fff;
             background-image: none; border: 1px solid #ccc; border-radius: 4px;
             box-shadow: inset 0 1px 1px rgba(0,0,0,.075);
             transition: border-color ease-in-out .15s,box-shadow ease-in-out .15s;
         }
         .form-control:focus { border-color: #66afe9; outline: 0; box-shadow: inset 0 1px 1px rgba(0,0,0,.075),0 0 8px rgba(102,175,233,.6); }
-        .xyrj-primary { color: #fff; background-color: #409EFF; border: none; }
+        .xyrj-primary { color: #fff; background-color: #409EFF; }
         .xyrj-primary:hover { background-color: #3390ff; color: #fff; }
         .xyrj-login {
-            width: 100%; padding: 8px 12px; font-size: 16px; border-radius: 4px; cursor: pointer;
+            width: 100%; padding: 6px 12px; font-size: 14px; line-height: 1.42857143;
+            border: 1px solid transparent; border-radius: 4px; cursor: pointer;
             transition: background-color 0.3s;
         }
-        .footer-link { margin-top: 20px; font-size: 13px; color: #777; }
+        .footer-link { margin-top: 16px; text-align: right; font-size: 13px; color: #777; }
         .footer-link a { color: #409EFF; text-decoration: none; }
+        /* [新增] 登录框底部标语（原“完全免费博客”→“Powered by XYRJ-Faka”） */
+        .login-tagline { text-align: center; color: #686a69ba; font-size: 13px; margin: 38px 16px; }
     </style>
 </head>
 <body>
@@ -53,14 +56,16 @@
         </div>
         <div id="captcha-container" class="form-group" style="display: none; align-items: center; justify-content: space-between;">
             <input type="text" id="captcha" class="form-control" placeholder="请输入右侧验证码" style="width: 55%;" autocomplete="off">
-            <div id="captcha-img" style="cursor: pointer; width: 40%; height: 42px; display: flex; align-items: center; justify-content: center; border-radius: 4px; overflow: hidden;" title="看不清？点击刷新"></div>
+            <div id="captcha-img" style="cursor: pointer; width: 40%; height: 34px; display: flex; align-items: center; justify-content: center; border-radius: 4px; overflow: hidden;" title="看不清？点击刷新"></div>
         </div>
         <div id="turnstile-container" class="form-group" style="display: none; justify-content: center;"></div>
         <button onclick="login()" class="xyrj-primary xyrj-login">登录</button>
         <div class="footer-link">
-            Powered by XYRJ-Faka
+            <a href="/">&larr; 返回商城首页</a>
         </div>
     </div>
+    <!-- [新增] 底部标语（原“这是一个基于 Cloudflare 搭建的完全免费博客！”） -->
+    <div class="login-tagline">Powered by XYRJ-Faka</div>
 </div>
 
 <script>
