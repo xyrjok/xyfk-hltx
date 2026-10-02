@@ -89,24 +89,10 @@ window.showBalanceResult=function(cards,msg){var o=document.createElement('div')
         }
         line.textContent = text + '（' + (p.member_discount / 10) + '折）';
     }
-    // 规格按钮标注后端预计算会员价 + 折扣徽章
+    // 折扣徽章 + 价格栏会员价（规格按钮上不再标注会员价）
     (function renderMemberMarks() {
         const p = (typeof currentProduct !== 'undefined') ? currentProduct : null;
         if (!p || p.member_price_enabled === 0 || p.member_discount == null) return;
-        document.querySelectorAll('.variant-btn, .sku-btn').forEach((btn, i) => {
-            const idx = (btn.dataset && btn.dataset.idx !== undefined && btn.dataset.idx !== '') ? parseInt(btn.dataset.idx) : i;
-            const v = ((p && p.variants) || [])[idx];
-            if (!v || v.member_price == null || btn.querySelector('.member-sku-price')) return;
-            const span = document.createElement('span');
-            span.className = 'member-sku-price';
-            span.style.cssText = 'color:#e74c3c; font-size:11px; margin-left:4px;';
-            span.textContent = '会员¥' + Number(v.member_price).toFixed(2);
-            btn.appendChild(span);
-        });
-        // 规格按钮注入后重新计算分页行高，防止按钮换行导致分页错位
-        if (typeof initSpecPagination === 'function') {
-            try { initSpecPagination('#sku-btn-list', '.variant-btn, .sku-btn', 6); } catch(e) {}
-        }
         renderMemberPriceLine();
         const priceBar = findMemberPriceBar();
         if (priceBar && !document.getElementById('member-discount-badge')) {
