@@ -18,7 +18,7 @@
             background-color: #fff; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
             border-radius: 8px; text-align: center; margin: 0 16px;
         }
-        .login-header { margin-bottom: 15px; }
+        .login-header { margin-bottom: 1px; }
         .form-group { margin-bottom: 15px; text-align: left; }
         .form-control {
             display: block; width: 100%; padding: 6px 12px; font-size: 14px;
@@ -36,8 +36,8 @@
             border: 1px solid transparent; border-radius: 4px; cursor: pointer;
             transition: background-color 0.3s;
         }
-        .auth-tabs { display: flex; margin-bottom: 15px; border-bottom: 2px solid #eee; }
-        .auth-tab { flex: 1; text-align: center; padding: 10px 0; cursor: pointer; font-size: 15px; font-weight: 600; color: #999; transition: all 0.3s; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .auth-tabs { display: flex; border-bottom: 2px solid #eee; }
+        .auth-tab { flex: 1; text-align: center; padding: 5px 0; cursor: pointer; font-size: 15px; font-weight: 600; color: #999; transition: all 0.3s; border-bottom: 2px solid transparent; margin-bottom: -2px; }
         .auth-tab.active { color: #409EFF; border-bottom-color: #409EFF; }
         .auth-form { display: none; }
         .auth-form.active { display: block; }
@@ -67,7 +67,7 @@
             <div class="auth-tab" id="register-tab" onclick="switchTab('register')">注册</div>
         </div>
 
-        <div id="reg-closed-notice" style="display:none; margin-top:8px; font-size:12px; color:#999; text-align:center;">会员系统已关闭，暂不开放注册</div>
+        <div id="reg-closed-notice" style="display:none; margin: 5px 0; font-size:12px; color:#999; text-align:center;">会员系统已关闭，暂不开放注册</div>
 
         <!-- 登录表单 -->
         <form id="login-form" class="auth-form active" onsubmit="return handleLogin(event)">
