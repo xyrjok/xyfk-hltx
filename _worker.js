@@ -531,6 +531,9 @@ async function verifyEpayCallback(config, params) {
     };
 })();
 
+// [C优化] rate_limits 建表标记：本实例建过一次后跳过，减少每请求一次 D1 往返
+let _rateLimitsTableReady = false;
+
 // === 登录页服务端直出 Logo ===
 // 作用：把数据库里的 site_logo / site_name 直接渲染进登录页 HTML，
 // 让 <img> 随首屏并行下载（不再等 /api/shop/config 返回后才由 JS 注入）。
@@ -2700,16 +2703,29 @@ async function handleApi(request, env, url, ctx) {
             const windowSeconds = 60;
             const maxRequests = 10;
             try {
-                await db.prepare('CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER DEFAULT 1, first_attempt INTEGER NOT NULL)').run();
-                const rateRow = await db.prepare('SELECT count, first_attempt FROM rate_limits WHERE key=?').bind(captchaRateKey).first();
-                if (rateRow && (nowTs - rateRow.first_attempt) < windowSeconds && rateRow.count >= maxRequests) {
-                    const remain = windowSeconds - (nowTs - rateRow.first_attempt);
-                    return errRes('验证码请求过于频繁，请 ' + remain + ' 秒后重试', 429);
+                // [C优化] 建表只在本实例首次执行，省掉每请求一次往返
+                if (!_rateLimitsTableReady) {
+                    await db.prepare('CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER DEFAULT 1, first_attempt INTEGER NOT NULL)').run();
+                    _rateLimitsTableReady = true;
                 }
-                if (!rateRow || (nowTs - rateRow.first_attempt) >= windowSeconds) {
-                    await db.prepare("INSERT INTO rate_limits (key, count, first_attempt) VALUES (?, 1, ?) ON CONFLICT(key) DO UPDATE SET count=1, first_attempt=excluded.first_attempt").bind(captchaRateKey, nowTs).run();
-                } else {
-                    await db.prepare("UPDATE rate_limits SET count=count+1 WHERE key=?").bind(captchaRateKey).run();
+                // [C优化] 将"查计数+加计数"合并为单条 upsert...RETURNING，再省一次往返；
+                // 规则不变：同一 IP 60 秒内最多 10 次，超出即 429（防护完全保留）
+                const windowStart = nowTs - windowSeconds;
+                const rl = await db.prepare(
+                    "INSERT INTO rate_limits (key, count, first_attempt) VALUES (?, 1, ?) " +
+                    "ON CONFLICT(key) DO UPDATE SET " +
+                    "count = CASE WHEN first_attempt <= ? THEN 1 ELSE count + 1 END, " +
+                    "first_attempt = CASE WHEN first_attempt <= ? THEN ? ELSE first_attempt END " +
+                    "RETURNING count, first_attempt"
+                ).bind(captchaRateKey, nowTs, windowStart, windowStart, nowTs).all();
+                let row = rl.results && rl.results[0];
+                if (!row) {
+                    // 兼底：万一 RETURNING 未回传，退回一次 SELECT，确保限流仍生效（不静默失效）
+                    row = await db.prepare('SELECT count, first_attempt FROM rate_limits WHERE key=?').bind(captchaRateKey).first();
+                }
+                if (row && row.count > maxRequests) {
+                    const remain = windowSeconds - (nowTs - row.first_attempt);
+                    return errRes('验证码请求过于频繁，请 ' + remain + ' 秒后重试', 429);
                 }
             } catch(e) { console.error('Captcha rate limit error:', e); }
             // [安全加固·M4修复] 答案存服务端，一次性令牌校验

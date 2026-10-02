@@ -114,7 +114,7 @@
     <div class="login-tagline">Powered by XYRJ-Faka</div>
 </div>
 
-<script src="/assets/jquery-3.6.0.min.js"></script>
+<script src="/assets/jquery-3.6.0.min.js" defer></script>
 <script>
     if (localStorage.getItem('member_token')) window.location.href = '/member';
 
@@ -152,14 +152,15 @@
         } catch(e) { console.error('验证码加载失败'); }
     }
 
-    // 初始化加载验证码
+    // 初始化加载验证码（注册验证码懒加载：切到"注册"Tab 时才拉，减少首屏请求数）
     loadCaptcha('login');
-    loadCaptcha('reg');
 
     function switchTab(tab) {
         // [会员系统开关] 会员系统关闭时不允许切到注册页
         const regTabEl = document.getElementById('register-tab');
         if (tab === 'register' && regTabEl && regTabEl.style.display === 'none') return;
+        // [A] 注册验证码懒加载：首次切到"注册"时才拉取
+        if (tab === 'register' && !captchaState.reg.hash) loadCaptcha('reg');
         $('.auth-tab').removeClass('active');
         $('.auth-form').removeClass('active');
         if (tab === 'login') {
@@ -253,7 +254,8 @@
 
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Enter') {
-            if ($('#login-form').hasClass('active')) handleLogin(e);
+            // 原生判断，避免 jQuery 未就绪时回车触发报错
+            if (document.getElementById('login-form').classList.contains('active')) handleLogin(e);
             else handleRegister(e);
         }
     });
