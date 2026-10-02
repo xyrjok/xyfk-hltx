@@ -976,20 +976,20 @@ async function ensureProductColumns(db) {
     _productSchemaEnsured = true;
 }
 
-// [统一口径] 会员折扣解析：只认 member_enabled + member_levels[member_level].discount
+// [统一口径] 会员折扣解析：只认 member_levels[member_level].discount
 // 下单、购物车结算、前台会员价展示全部走这一个函数；返回 1..99 = 折扣百分比，100 = 无折扣
+// [修改] 折扣不再受“会员系统”总开关限制（总开关仅控制注册）：
+//       折扣只由 等级配置(member_levels) + 用户等级(member_level) 决定，
+//       商品级开关(member_price_enabled) 在 attachMemberPricing / 结算处另行控制
 async function resolveMemberDiscount(db, memberLevel) {
     try {
-        const memberEnabledRow = await db.prepare("SELECT value FROM site_config WHERE key='member_enabled'").first();
-        if (memberEnabledRow && memberEnabledRow.value === '1') {
-            const levelsRow = await db.prepare("SELECT value FROM site_config WHERE key='member_levels'").first();
-            if (levelsRow && levelsRow.value) {
-                const levels = JSON.parse(levelsRow.value);
-                const lvl = memberLevel ? parseInt(memberLevel) : 0;
-                if (levels[lvl] && levels[lvl].discount) {
-                    const d = parseInt(levels[lvl].discount);
-                    if (d >= 1 && d < 100) return d;
-                }
+        const levelsRow = await db.prepare("SELECT value FROM site_config WHERE key='member_levels'").first();
+        if (levelsRow && levelsRow.value) {
+            const levels = JSON.parse(levelsRow.value);
+            const lvl = memberLevel ? parseInt(memberLevel) : 0;
+            if (levels[lvl] && levels[lvl].discount) {
+                const d = parseInt(levels[lvl].discount);
+                if (d >= 1 && d < 100) return d;
             }
         }
     } catch(e) {}
@@ -2847,8 +2847,8 @@ async function handleApi(request, env, url, ctx) {
             newBalance = (await db.prepare('SELECT balance FROM users WHERE id=?').bind(user.id).first()).balance;
             // 充值/消费后自动升级检查
             try {
-                const enabledRow = await db.prepare("SELECT value FROM site_config WHERE key='member_enabled'").first();
-                if (enabledRow && enabledRow.value === '1') {
+                // [修改] 自动升级不受“会员系统”总开关限制（总开关仅管注册），由升级规则自身的金额门槛控制
+                {
                     const rulesRow = await db.prepare("SELECT value FROM site_config WHERE key='member_upgrade_rules'").first();
                     if (rulesRow && rulesRow.value) {
                         const rules = JSON.parse(rulesRow.value);
@@ -3686,8 +3686,8 @@ async function handleApi(request, env, url, ctx) {
                     await db.prepare('UPDATE users SET total_recharge = total_recharge + ? WHERE id=?').bind(rechargeAmount, order.user_id).run();
                     await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(order.user_id, rechargeAmount, 'recharge', '充值' + rechargeAmount + '元', out_trade_no, time()).run();
                     try {
-                        const enRow = await db.prepare("SELECT value FROM site_config WHERE key='member_enabled'").first();
-                        if (enRow && enRow.value === '1') {
+                        // [修改] 自动升级不受“会员系统”总开关限制（总开关仅管注册），由升级规则自身的金额门槛控制
+                        {
                             const rlRow = await db.prepare("SELECT value FROM site_config WHERE key='member_upgrade_rules'").first();
                             if (rlRow && rlRow.value) {
                                 const rules = JSON.parse(rlRow.value);
@@ -4062,8 +4062,8 @@ ${cardContentForCustomer}
                         await db.prepare('UPDATE users SET total_recharge = total_recharge + ? WHERE id=?').bind(rechargeAmount, order.user_id).run();
                         await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(order.user_id, rechargeAmount, 'recharge', '充值' + rechargeAmount + '元', out_trade_no, time()).run();
                         try {
-                            const enRow2 = await db.prepare("SELECT value FROM site_config WHERE key='member_enabled'").first();
-                            if (enRow2 && enRow2.value === '1') {
+                            // [修改] 自动升级不受“会员系统”总开关限制（总开关仅管注册），由升级规则自身的金额门槛控制
+                            {
                                 const rlRow2 = await db.prepare("SELECT value FROM site_config WHERE key='member_upgrade_rules'").first();
                                 if (rlRow2 && rlRow2.value) {
                                     const rules2 = JSON.parse(rlRow2.value);
@@ -4219,8 +4219,8 @@ ${cardContentForCustomer}
                     await db.prepare('UPDATE users SET total_recharge = total_recharge + ? WHERE id=?').bind(rechargeAmount, paidOrder.user_id).run();
                     await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(paidOrder.user_id, rechargeAmount, 'recharge', '充值' + rechargeAmount + '元', out_trade_no, time()).run();
                     try {
-                        const enRow3 = await db.prepare("SELECT value FROM site_config WHERE key='member_enabled'").first();
-                        if (enRow3 && enRow3.value === '1') {
+                        // [修改] 自动升级不受“会员系统”总开关限制（总开关仅管注册），由升级规则自身的金额门槛控制
+                        {
                             const rlRow3 = await db.prepare("SELECT value FROM site_config WHERE key='member_upgrade_rules'").first();
                             if (rlRow3 && rlRow3.value) {
                                 const rules3 = JSON.parse(rlRow3.value);
