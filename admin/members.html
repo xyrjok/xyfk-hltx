@@ -314,11 +314,14 @@
 
     const levelColors = ['bg-primary', 'bg-success', 'bg-info', 'bg-warning text-dark', 'bg-danger', 'bg-dark', 'bg-secondary'];
 
+    // [修复] 等级 = member_levels 数组下标（与折扣解析 resolveMemberDiscount / 自动升级规则同一口径）：
+    // 等级 0 就是配置里的第 1 行，不再是隐式的“普通会员”
     function getLevelName(levelIndex) {
-        if (!levelIndex || levelIndex <= 0 || !memberLevelsConfig[levelIndex]) return '<span class="badge bg-secondary">普通会员</span>';
-        const lv = memberLevelsConfig[levelIndex];
-        const colorClass = levelColors[(levelIndex - 1) % levelColors.length];
-        return '<span class="badge ' + colorClass + '">' + escHtml(lv.name || '等级' + levelIndex) + '</span>';
+        const idx = parseInt(levelIndex) || 0;
+        const lv = memberLevelsConfig[idx];
+        if (!lv) return '<span class="badge bg-secondary">' + (idx === 0 ? '普通会员' : '等级' + idx) + '</span>';
+        const colorClass = levelColors[idx % levelColors.length];
+        return '<span class="badge ' + colorClass + '">' + escHtml(lv.name || ('等级' + idx)) + '</span>';
     }
 
     async function api(path, options = {}) {
@@ -396,10 +399,9 @@
         msgEl.textContent = '';
         // 等级下拉（与设置等级弹窗同一套配置）
         const sel = document.getElementById('add-level');
-        sel.innerHTML = '<option value="0">普通会员</option>';
-        sel.innerHTML += (memberLevelsConfig || []).map((lv, i) =>
-            lv ? `<option value="${i}">${escHtml(lv.name || '等级' + i)}</option>` : ''
-        ).join('');
+        sel.innerHTML = (memberLevelsConfig || []).map((lv, i) =>
+            lv ? `<option value="${i}">${escHtml(lv.name || ('等级' + i))}</option>` : ''
+        ).join('') || '<option value="0">普通会员</option>';
         new bootstrap.Modal(document.getElementById('addMemberModal')).show();
     }
 
@@ -533,10 +535,11 @@
         document.getElementById('level-username').textContent = username;
         document.getElementById('level-current').innerHTML = getLevelName(currentLevel);
         const sel = document.getElementById('level-select');
-        sel.innerHTML = '<option value="0">普通会员</option>';
-        sel.innerHTML += memberLevelsConfig.map((lv, i) =>
-            `<option value="${i}" ${currentLevel === i ? 'selected' : ''}>${escHtml(lv.name || '等级' + i)}</option>`
-        ).join('');
+        // [修复] 等级下拉 = member_levels 数组下标，不再重复插入固定“普通会员(0)”——
+        // 否则配置的第 1 行与“普通会员”取值冲突（都是 0），设置后看起来“没效果”
+        sel.innerHTML = (memberLevelsConfig || []).map((lv, i) =>
+            `<option value="${i}" ${currentLevel === i ? 'selected' : ''}>${escHtml(lv.name || ('等级' + i))}</option>`
+        ).join('') || '<option value="0">普通会员</option>';
         new bootstrap.Modal(document.getElementById('levelModal')).show();
     }
 
