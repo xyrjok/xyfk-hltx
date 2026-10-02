@@ -407,7 +407,7 @@
     // 计算并生成商品的“会员价”展示（按各会员等级折扣计算售价区间）
     function memberPriceHtml(p) {
         if (p.member_price_enabled === 0) return '<span class="text-muted small">已关闭</span>';
-        const prices = (p.variants || []).map(v => parseFloat(v.price) || 0);
+        const prices = (p.variants || []).filter(v => v.active !== 0).map(v => parseFloat(v.price) || 0); // 仅统计在售规格，与前台展示口径一致
         if (prices.length === 0) return '<span class="text-muted small">—</span>';
         const levels = memberLevelsData.filter(l => l && parseInt(l.discount) >= 1 && parseInt(l.discount) < 100);
         if (levels.length === 0) return '<span class="text-muted small">未配置折扣</span>';

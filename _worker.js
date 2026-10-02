@@ -1169,8 +1169,10 @@ async function handleApi(request, env, url, ctx) {
             if (path === '/api/admin/product/member_price' && method === 'POST') {
                 const { id, enabled } = await request.json();
                 if (!id) return errRes('缺少商品ID');
-                const memberPriceVal = enabled ? 1 : 0;
-                await db.prepare("UPDATE products SET member_price_enabled=? WHERE id=?").bind(memberPriceVal, id).run();
+                // 归一化 enabled（防止字符串 "0"/"false" 被真值判断误当作开启）
+                const memberPriceVal = (enabled === true || enabled === 1 || enabled === '1') ? 1 : 0;
+                const upd = await db.prepare("UPDATE products SET member_price_enabled=? WHERE id=?").bind(memberPriceVal, id).run();
+                if (!upd.meta || !upd.meta.changes) return errRes('商品不存在');
                 return jsonRes({ success: true, member_price_enabled: memberPriceVal });
             }
 
@@ -3285,14 +3287,20 @@ async function handleApi(request, env, url, ctx) {
             // (已在上方提前检测)
 
             // 应用会员折扣（未开启“会员价”的商品不享受折扣）
+            let anyDiscounted = false;
+            let originalTotal = 0;
             if (memberDiscount < 100) {
                 for (const vi of validatedItems) {
-                    if (vi.memberPriceEnabled) vi.price = Math.round(vi.price * memberDiscount / 100 * 100) / 100;
+                    originalTotal += vi.price * vi.quantity;
+                    if (vi.memberPriceEnabled) { vi.price = Math.round(vi.price * memberDiscount / 100 * 100) / 100; anyDiscounted = true; }
                     delete vi.memberPriceEnabled;
                 }
                 total_amount = validatedItems.reduce((sum, vi) => sum + vi.price * vi.quantity, 0);
             } else {
-                for (const vi of validatedItems) delete vi.memberPriceEnabled;
+                for (const vi of validatedItems) {
+                    originalTotal += vi.price * vi.quantity;
+                    delete vi.memberPriceEnabled;
+                }
             }
 
             if (total_amount <= 0.01) return errRes('金额必须大于 0.01');
@@ -3320,7 +3328,9 @@ async function handleApi(request, env, url, ctx) {
                 cartUserId
             ).run();
 
-            return jsonRes({ order_id, total_amount, payment_method });
+            // 返回会员折扣信息（与单买接口同结构，前端据此提示“会员折扣已生效”）
+            const cartDiscountInfo = anyDiscounted ? { member_discount: memberDiscount, original_price: parseFloat(originalTotal.toFixed(2)) } : null;
+            return jsonRes({ order_id, total_amount, payment_method, discount: cartDiscountInfo });
         }
 
         // =======================================================
