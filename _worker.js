@@ -976,6 +976,54 @@ async function ensureProductColumns(db) {
     _productSchemaEnsured = true;
 }
 
+// [统一口径] 会员折扣解析：只认 member_enabled + member_levels[member_level].discount
+// 下单、购物车结算、前台会员价展示全部走这一个函数；返回 1..99 = 折扣百分比，100 = 无折扣
+async function resolveMemberDiscount(db, memberLevel) {
+    try {
+        const memberEnabledRow = await db.prepare("SELECT value FROM site_config WHERE key='member_enabled'").first();
+        if (memberEnabledRow && memberEnabledRow.value === '1') {
+            const levelsRow = await db.prepare("SELECT value FROM site_config WHERE key='member_levels'").first();
+            if (levelsRow && levelsRow.value) {
+                const levels = JSON.parse(levelsRow.value);
+                const lvl = memberLevel ? parseInt(memberLevel) : 0;
+                if (levels[lvl] && levels[lvl].discount) {
+                    const d = parseInt(levels[lvl].discount);
+                    if (d >= 1 && d < 100) return d;
+                }
+            }
+        }
+    } catch(e) {}
+    return 100;
+}
+
+// [统一口径] 为商品/规格附加预计算会员价（仅会员请求时调用）。
+// 所有折扣/取整运算只发生在后端，前端只做“选择 + 展示”：
+//   product.member_discount     = 折扣百分比（商品关闭会员价时也返回，便于前端提示）
+//   variant.member_price        = 基准会员价
+//   variant.member_price_select = 自选加价后的会员价（custom_markup > 0 时）
+//   variant.member_wholesale    = 各批发档位的会员价 [{qty, price}]（与结算同口径 {qty, price}）
+function attachMemberPricing(product, variants, discount) {
+    if (!(discount >= 1 && discount < 100)) return;
+    product.member_discount = discount;
+    if (product.member_price_enabled === 0) return;
+    for (const v of variants) {
+        const base = parseFloat(v.price) || 0;
+        v.member_price = Math.round(base * discount / 100 * 100) / 100;
+        const markup = parseFloat(v.custom_markup || 0);
+        if (markup > 0) v.member_price_select = Math.round((base + markup) * discount / 100 * 100) / 100;
+        if (v.wholesale_config) {
+            let wc = v.wholesale_config;
+            try { if (typeof wc === 'string') wc = JSON.parse(wc); } catch(e) { wc = null; }
+            if (Array.isArray(wc)) {
+                v.member_wholesale = wc.map(r => {
+                    const qty = parseInt(r.qty), price = parseFloat(r.price);
+                    return (qty > 0 && !isNaN(price)) ? { qty, price: Math.round(price * discount / 100 * 100) / 100 } : null;
+                }).filter(Boolean);
+            }
+        }
+    }
+}
+
 async function handleApi(request, env, url, ctx) {
     const method = request.method;
     const path = url.pathname;
@@ -2467,6 +2515,12 @@ async function handleApi(request, env, url, ctx) {
                 }
             }
             
+            // [统一口径] 会员请求时返回预计算会员价（游客/无折扣不返回）
+            const mlUser = await memberAuth(request, env, db);
+            if (mlUser) {
+                const mlDiscount = await resolveMemberDiscount(db, mlUser.member_level);
+                for (const p of res) attachMemberPricing(p, p.variants || [], mlDiscount);
+            }
             return jsonRes(res);
         }
         
@@ -2493,6 +2547,9 @@ async function handleApi(request, env, url, ctx) {
             });
 
             product.variants = variants;
+            // [统一口径] 会员请求时返回预计算会员价（游客/无折扣不返回）
+            const mpUser = await memberAuth(request, env, db);
+            if (mpUser) attachMemberPricing(product, variants, await resolveMemberDiscount(db, mpUser.member_level));
             return jsonRes(product);
         }
 
@@ -3025,22 +3082,9 @@ async function handleApi(request, env, url, ctx) {
                             isMember = true;
                             memberEmail = mUser.email || mUser.username || '会员订单';
                             memberEncryptedPwd = mUser.password_encrypted || '';
-                            // 获取会员折扣
-                            const memberEnabledRow = await db.prepare("SELECT value FROM site_config WHERE key='member_enabled'").first();
-                            if (memberEnabledRow && memberEnabledRow.value === '1') {
-                                const userRow = await db.prepare('SELECT member_level FROM users WHERE id=?').bind(mUserId).first();
-                                const userLevel = (userRow && userRow.member_level) ? userRow.member_level : 0;
-                                const levelsRow = await db.prepare("SELECT value FROM site_config WHERE key='member_levels'").first();
-                                if (levelsRow && levelsRow.value) {
-                                    try {
-                                        const levels = JSON.parse(levelsRow.value);
-                                        if (levels[userLevel] && levels[userLevel].discount) {
-                                            const d = parseInt(levels[userLevel].discount);
-                                            if (d >= 1 && d < 100) memberDiscount = d;
-                                        }
-                                    } catch(e) {}
-                                }
-                            }
+                            // 获取会员折扣（统一口径：resolveMemberDiscount，与前台会员价展示一致）
+                            const userRow = await db.prepare('SELECT member_level FROM users WHERE id=?').bind(mUserId).first();
+                            memberDiscount = await resolveMemberDiscount(db, (userRow && userRow.member_level) ? userRow.member_level : 0);
                         }
                     }
                 }
@@ -3173,21 +3217,9 @@ async function handleApi(request, env, url, ctx) {
                             isMember = true;
                             memberEmail = mUser.email || mUser.username || '会员订单';
                             memberEncryptedPwd = mUser.password_encrypted || '';
-                            const memberEnabledRow2 = await db.prepare("SELECT value FROM site_config WHERE key='member_enabled'").first();
-                            if (memberEnabledRow2 && memberEnabledRow2.value === '1') {
-                                const userRow2 = await db.prepare('SELECT member_level FROM users WHERE id=?').bind(mUserId).first();
-                                const userLevel2 = (userRow2 && userRow2.member_level) ? userRow2.member_level : 0;
-                                const levelsRow2 = await db.prepare("SELECT value FROM site_config WHERE key='member_levels'").first();
-                                if (levelsRow2 && levelsRow2.value) {
-                                    try {
-                                        const levels2 = JSON.parse(levelsRow2.value);
-                                        if (levels2[userLevel2] && levels2[userLevel2].discount) {
-                                            const d = parseInt(levels2[userLevel2].discount);
-                                            if (d >= 1 && d < 100) memberDiscount = d;
-                                        }
-                                    } catch(e) {}
-                                }
-                            }
+                            // 获取会员折扣（统一口径：resolveMemberDiscount，与前台会员价展示一致）
+                            const userRow2 = await db.prepare('SELECT member_level FROM users WHERE id=?').bind(mUserId).first();
+                            memberDiscount = await resolveMemberDiscount(db, (userRow2 && userRow2.member_level) ? userRow2.member_level : 0);
                         }
                     }
                 }

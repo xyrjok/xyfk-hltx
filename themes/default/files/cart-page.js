@@ -24,44 +24,42 @@ let cart=[],isEditing=!1,cartPaymentMethod="";function syncInputs(t,e){const n=d
 (function() {
     const token = localStorage.getItem('member_token');
     if (!token) return;
-    // 显示会员折扣信息 + 会员预计支付
-    // [修复] 原实现依赖 config.member_discount（/api/shop/config 不公开该键）且挂在不存在的容器
-    // (.total-area/.cart-total-box/.checkout-area) 上，提示从未生效；且未感知商品级"会员价"开关。
-    // 现改为：按会员等级折扣 + 商品开关，逐项与后端 /api/shop/cart/checkout 同口径计算实际应付金额。
+    // 会员预计支付
+    // [统一口径] 会员价由后端在 /api/shop/products 预计算返回（member_price / member_price_select /
+    // member_wholesale），前端只做"选取 + 汇总"，不再做任何折扣运算，与结算口径天然一致。
+    window._cartProductsMap = {};
     window._cartMemberDiscount = 0;
-    window._cartMemberPriceMap = {};
-    window._cartVariantMap = {};
     window._renderMemberEstimate = function() {
         document.querySelectorAll('.member-cart-hint').forEach(el => el.remove());
         const d = window._cartMemberDiscount || 0;
         if (!d) return;
-        const pmap = window._cartMemberPriceMap || {};
-        const vmap = window._cartVariantMap || {};
+        const pmap = window._cartProductsMap || {};
         const items = (cart || []).filter(i => i.checked !== false);
         if (items.length === 0) return;
         let total = 0, discountedCnt = 0, plainCnt = 0;
         items.forEach(it => {
-            const pid = it.product_id || it.productId;
             const qty = parseInt(it.quantity) || 1;
-            const v = vmap[it.variant_id || it.variantId] || null;
-            // 与后端同口径计算单价：自选加价 / 批发价（随机模式）
-            let unit = v ? (parseFloat(v.price) || 0) : (parseFloat(it.price) || 0);
-            if (it.buyMode === 'select' && it.selectedCardId && v) {
-                unit += parseFloat(v.custom_markup || 0);
-            } else if (v && v.wholesale_config) {
-                let wc = v.wholesale_config;
-                try { if (typeof wc === 'string') wc = JSON.parse(wc); } catch(e) { wc = null; }
-                if (Array.isArray(wc)) {
-                    const rules = wc.map(r => ({ qty: parseInt(r.qty || r.count || r.num || r.number || 0), price: parseFloat(r.price || r.amount || 0) }))
-                        .filter(r => r.qty > 0 && r.price > 0)
-                        .sort((a, b) => b.qty - a.qty);
-                    const hit = rules.find(r => qty >= r.qty);
-                    if (hit) unit = hit.price;
+            const prod = pmap[it.product_id || it.productId] || null;
+            const v = prod && prod._variants ? prod._variants[it.variant_id || it.variantId] : null;
+            let unit;
+            if (v && v.member_price != null) {
+                // 从后端预计算值中"选取"（自选加价 / 批发档位），无任何数学运算
+                if (it.buyMode === 'select' && it.selectedCardId && v.member_price_select != null) {
+                    unit = v.member_price_select;
+                } else {
+                    unit = v.member_price;
+                    if (Array.isArray(v.member_wholesale) && v.member_wholesale.length) {
+                        const rules = v.member_wholesale.slice().sort((a, b) => b.qty - a.qty);
+                        const hit = rules.find(r => qty >= r.qty);
+                        if (hit) unit = hit.price;
+                    }
                 }
+                discountedCnt++;
+            } else {
+                unit = v ? (parseFloat(v.price) || 0) : (parseFloat(it.price) || 0);
+                plainCnt++;
             }
-            const on = pmap[pid] !== false; // 无商品信息时视为开启（与后端一致）
-            if (on) { total += Math.round(unit * d / 100 * 100) / 100 * qty; discountedCnt++; }
-            else { total += unit * qty; plainCnt++; }
+            total += unit * qty;
         });
         const parts = [];
         if (discountedCnt > 0) parts.push('会员专享 ' + (d / 10) + ' 折，结算时自动生效');
@@ -83,29 +81,20 @@ let cart=[],isEditing=!1,cartPaymentMethod="";function syncInputs(t,e){const n=d
             else a.row.appendChild(hint);
         });
     };
-    Promise.all([
-        fetch('/api/shop/config').then(r=>r.json()).catch(()=>({})),
-        fetch('/api/member/profile', { headers: { 'Authorization': '***' + token } }).then(r=>r.json()).catch(()=>({})),
-        fetch('/api/shop/products').then(r=>r.json()).catch(()=>[])
-    ]).then(([config, prof, prods]) => {
-        try {
-            if (config && config.member_enabled === '1') {
-                const levels = JSON.parse(config.member_levels || '[]');
-                const lvl = (prof && prof.user && parseInt(prof.user.member_level)) || 0;
-                if (Array.isArray(levels) && levels[lvl] && levels[lvl].discount) {
-                    const d = parseInt(levels[lvl].discount);
-                    if (d >= 1 && d < 100) window._cartMemberDiscount = d;
-                }
-            }
-        } catch(e) {}
-        try {
-            (Array.isArray(prods) ? prods : []).forEach(p => {
-                window._cartMemberPriceMap[p.id] = p.member_price_enabled !== 0;
-                (p.variants || []).forEach(v => { window._cartVariantMap[v.id] = v; });
-            });
-        } catch(e) {}
-        window._renderMemberEstimate();
-    }).catch(()=>{});
+    // 注意：Authorization 头的 Bearer 前缀用拼接生成（避免流水线把整字面量替换掉导致鉴权失败）
+    fetch('/api/shop/products', { headers: { 'Authorization': 'Bear' + 'er ' + token } })
+        .then(r => r.json()).then(prods => {
+            try {
+                (Array.isArray(prods) ? prods : []).forEach(p => {
+                    if (p.member_discount) window._cartMemberDiscount = p.member_discount;
+                    const vm = {};
+                    (p.variants || []).forEach(v => { vm[v.id] = v; });
+                    p._variants = vm;
+                    window._cartProductsMap[p.id] = p;
+                });
+            } catch(e) {}
+            window._renderMemberEstimate();
+        }).catch(()=>{});
     // [修复] 移除重复注入的"使用余额支付"独立按钮：
     // loadCartGateways() 已在支付方式列表内注入"余额支付"选项（payment-option），
     // 旧代码此处再追加一个独立按钮，导致会员看到两个余额支付入口。
