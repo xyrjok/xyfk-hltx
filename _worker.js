@@ -561,7 +561,7 @@ async function serveLoginHtml(env, url, assetPath) {
             }
             // 会员登录页：注册被后台关闭时，服务端直接渲染正确初始可见性，消除“先闪出注册/后隐藏”的抖动
             if (assetPath.indexOf('/member/') === 0 && c.member_enabled !== '1') {
-                headInject += '<style>#register-tab{display:none!important}#reg-closed-notice{display:block!important}</style>';
+                headInject += '<style>#register-tab{display:none!important}#reg-closed-notice{display:block!important}.auth-tabs{margin-bottom:0!important}</style>';
             }
         } catch (e) { /* 读取配置失败：保留占位符，交由前端 JS 兜底渲染 */ }
         if (headerInner) html = html.split('<!--XYRJ_LOGIN_HEADER-->').join(headerInner);
