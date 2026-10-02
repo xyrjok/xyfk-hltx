@@ -60,7 +60,7 @@
 
 <div id="login-wrapper">
     <div class="login-container">
-        <div class="login-header"></div>
+        <div class="login-header"><!--XYRJ_LOGIN_HEADER--></div>
 
         <div class="auth-tabs">
             <div class="auth-tab active" onclick="switchTab('login')">登录</div>
@@ -121,10 +121,13 @@
     // 加载站点 Logo
     fetch('/api/shop/config').then(r => r.json()).then(config => {
         const header = document.querySelector('.login-header');
-        if (config.site_logo) {
-            header.innerHTML = '<img src="' + config.site_logo + '" alt="Logo" style="max-height: 47px; max-width: 100%;">';
-        } else {
-            header.innerHTML = '<h1 style="margin:0;font-size:24px;color:#333;">' + (config.site_name || '会员中心') + '</h1>';
+        // Logo：服务端已直出则跳过，避免重复渲染/闪烁；否则用配置兜底渲染
+        if (!header.querySelector('img, h1')) {
+            if (config.site_logo) {
+                header.innerHTML = '<img src="' + config.site_logo + '" alt="Logo" style="max-height: 47px; max-width: 100%;">';
+            } else {
+                header.innerHTML = '<h1 style="margin:0;font-size:24px;color:#333;">' + (config.site_name || '会员中心') + '</h1>';
+            }
         }
         // [会员系统开关] 后台关闭时隐藏"注册"Tab，只保留登录（老会员仍可登录）
         if (config.member_enabled !== '1') {

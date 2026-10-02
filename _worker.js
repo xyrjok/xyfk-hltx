@@ -531,6 +531,43 @@ async function verifyEpayCallback(config, params) {
     };
 })();
 
+// === 登录页服务端直出 Logo ===
+// 作用：把数据库里的 site_logo / site_name 直接渲染进登录页 HTML，
+// 让 <img> 随首屏并行下载（不再等 /api/shop/config 返回后才由 JS 注入）。
+// 安全性：任何异常都回退到原始静态文件；占位符未命中则保持原样交由前端 JS 兜底，
+// 确保登录页在任何情况下都不会被破坏。
+async function serveLoginHtml(env, url, assetPath) {
+    const fetchAsset = () => env.ASSETS.fetch(new Request(new URL(assetPath, url.origin), { method: 'GET', headers: { 'X-Internal-Asset': '1' } }));
+    try {
+        const resp = await fetchAsset();
+        if (!resp || resp.status !== 200) return resp;
+        const ct = (resp.headers.get('content-type') || '');
+        if (ct && ct.indexOf('text/html') === -1) return resp;
+        let html = await resp.text();
+        let headerInner = '';
+        let preload = '';
+        try {
+            const db = env.xyfk;
+            const rows = await db.prepare("SELECT key, value FROM site_config WHERE key IN ('site_logo','site_name')").all();
+            const c = {};
+            if (rows && rows.results) rows.results.forEach(r => { c[r.key] = r.value; });
+            const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            if (c.site_logo) {
+                headerInner = '<img id="site-logo" src="' + esc(c.site_logo) + '" alt="Logo" style="max-height: 47px; max-width: 100%;">';
+                preload = '<link rel="preload" as="image" href="' + esc(c.site_logo) + '">';
+            } else {
+                const fallback = (assetPath.indexOf('/member/') === 0) ? '会员中心' : 'XYRJFK后台登录';
+                headerInner = '<h1 style="margin: 0; font-size: 24px; color: #333;">' + esc(c.site_name || fallback) + '</h1>';
+            }
+        } catch (e) { /* 读取配置失败：保留占位符，交由前端 JS 兜底渲染 */ }
+        if (headerInner) html = html.split('<!--XYRJ_LOGIN_HEADER-->').join(headerInner);
+        if (preload) html = html.replace('</head>', preload + '</head>');
+        return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' } });
+    } catch (e) {
+        try { return await fetchAsset(); } catch (e2) { return new Response('Internal Error', { status: 500 }); }
+    }
+}
+
 // === 主入口 ===
 export default {
     async fetch(request, env, ctx) {
@@ -601,15 +638,21 @@ export default {
         }
         
         // 规则 A: 排除不需要重写的系统路径
-        if (path.startsWith('/admin/') || path.startsWith('/themes/') || path.startsWith('/assets/')) {
+        if (path.startsWith('/admin/')) {
+             // 管理员登录页：服务端直出 Logo（异常自动回退原始静态页）
+             if (path === '/admin/' || path === '/admin/index.html') {
+                 return serveLoginHtml(env, url, '/admin/index.html');
+             }
+             return env.ASSETS.fetch(request);
+        }
+        if (path.startsWith('/themes/') || path.startsWith('/assets/')) {
              return env.ASSETS.fetch(request);
         }
 
         // === 会员页面路由 ===
-        if (path === '/member/login') {
-            const newUrl = new URL('/member/login.html', url.origin);
-            const internalReq = new Request(newUrl, { method: request.method, headers: { 'X-Internal-Asset': '1' } });
-            return env.ASSETS.fetch(internalReq);
+        if (path === '/member/login' || path === '/member/login.html') {
+            // 会员登录页：服务端直出 Logo（异常自动回退原始静态页）
+            return serveLoginHtml(env, url, '/member/login.html');
         }
         if (path === '/member/' || path === '/member/index.html') {
             return Response.redirect(url.origin + '/member', 301);

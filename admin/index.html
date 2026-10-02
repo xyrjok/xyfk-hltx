@@ -46,8 +46,7 @@
 
 <div id="login-wrapper">
     <div class="login-container">
-        <div class="login-header">
-        </div>
+        <div class="login-header"><!--XYRJ_LOGIN_HEADER--></div>
         <div class="form-group">
             <input type="text" id="user" class="form-control" placeholder="请输入用户名" required>
         </div>
@@ -71,15 +70,35 @@
 <script>
     // 检查 Token
     if(localStorage.getItem('ADMIN_TOKEN')) window.location.href = '/admin/dashboard.html';
-    fetch('/api/shop/config').then(res => res.json()).then(config => {
+    let currentCaptchaHash = '';
+    let currentCaptchaExpire = 0;
+    function applyCaptcha(data) {
+        if (!data) return;
+        document.getElementById('captcha-img').innerHTML = data.svg;
+        currentCaptchaHash = data.hash;
+        currentCaptchaExpire = data.expire; // 记录后端发来的过期时间
+    }
+    async function loadCaptcha() {
+        try {
+            const res = await fetch('/api/admin/captcha');
+            applyCaptcha(await res.json());
+        } catch (e) { console.error('验证码加载失败'); }
+    }
+    // [提速] 验证码与站点配置并行拉取：不再嵌套在 config 的 .then() 内，省掉一整轮串行等待
+    const configPromise = fetch('/api/shop/config').then(res => res.json());
+    const captchaPromise = fetch('/api/admin/captcha').then(res => res.json()).catch(() => null);
+    configPromise.then(config => {
         const header = document.querySelector('.login-header');
-        if (config.site_logo) {
-            header.innerHTML = `<img src="${config.site_logo}" alt="Logo" style="max-height: 47px; max-width: 100%; ">`;
-        } else {
-            const title = config.site_name || 'XYRJFK后台登录';
-            header.innerHTML = `<h1 style="margin: 0; font-size: 24px; color: #333;">${title}</h1>`;
+        // Logo：服务端已直出则跳过，避免重复渲染/闪烁；否则用配置兜底渲染
+        if (!header.querySelector('img, h1')) {
+            if (config.site_logo) {
+                header.innerHTML = `<img src="${config.site_logo}" alt="Logo" style="max-height: 47px; max-width: 100%; ">`;
+            } else {
+                const title = config.site_name || 'XYRJFK后台登录';
+                header.innerHTML = `<h1 style="margin: 0; font-size: 24px; color: #333;">${title}</h1>`;
+            }
         }
-        // --- 渲染验证码和 Turnstile 模块 ---
+        // --- 渲染 Turnstile 模块 ---
         if (config.admin_turnstile_active === '1' && config.turnstile_site_key) {
             document.getElementById('turnstile-container').style.display = 'flex';
             const script = document.createElement('script');
@@ -88,25 +107,18 @@
             document.head.appendChild(script);
             setTimeout(() => { turnstile.render('#turnstile-container', { sitekey: config.turnstile_site_key }); }, 500);
         }
+        // --- 验证码开关（可开关细节处理）---
         if (config.admin_captcha_active === '1') {
             document.getElementById('captcha-container').style.display = 'flex';
-            loadCaptcha();
             document.getElementById('captcha-img').onclick = loadCaptcha;
+            captchaPromise.then(applyCaptcha); // 直接复用并行拉到的验证码，无需二次请求
+        } else {
+            // 后台已关闭图形验证码：丢弃并行拉到的验证码、保持容器隐藏
+            document.getElementById('captcha-container').style.display = 'none';
         }
     }).catch(e => {
         document.querySelector('.login-header').innerHTML = `<h1 style="margin: 0; font-size: 24px; color: #333;">XYRJFK后台登录</h1>`;
     });
-    let currentCaptchaHash = '';
-    let currentCaptchaExpire = 0; 
-    async function loadCaptcha() {
-        try {
-            const res = await fetch('/api/admin/captcha');
-            const data = await res.json();
-            document.getElementById('captcha-img').innerHTML = data.svg;
-            currentCaptchaHash = data.hash;
-            currentCaptchaExpire = data.expire; // 记录后端发来的过期时间
-        } catch (e) { console.error('验证码加载失败'); }
-    }
 
     async function login() {
         const user = document.getElementById('user').value;
