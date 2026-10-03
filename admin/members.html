@@ -104,13 +104,14 @@
                                 <th>邮箱</th>
                                 <th>等级</th>
                                 <th>余额</th>
+                                <th>充值限额</th>
                                 <th>订单数</th>
                                 <th>注册时间</th>
                                 <th>操作</th>
                             </tr>
                         </thead>
                         <tbody id="members-list">
-                            <tr><td colspan="7" class="text-center text-muted py-4">加载中...</td></tr>
+                            <tr><td colspan="8" class="text-center text-muted py-4">加载中...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -153,6 +154,17 @@
                         <label class="form-label">会员等级</label>
                         <select class="form-select form-select-sm" id="add-level"></select>
                     </div>
+                </div>
+                <div class="row">
+                    <div class="col-6 mb-3">
+                        <label class="form-label">单笔自助充值限额</label>
+                        <input type="number" class="form-control form-control-sm" id="add-limit-per" min="0" step="1" placeholder="留空用站点默认；0 = 不限">
+                    </div>
+                    <div class="col-6 mb-3">
+                        <label class="form-label">累计自助充值限额</label>
+                        <input type="number" class="form-control form-control-sm" id="add-limit-total" min="0" step="1" placeholder="留空用站点默认；0 = 不限">
+                    </div>
+                    <div class="col-12"><div class="form-text mt-0 mb-2">超过限额的充值需由管理员手动加余额（线下转账后入账），限额对管理员手动加余额不起作用。</div></div>
                 </div>
                 <div id="add-member-msg" class="small text-danger" style="display:none;"></div>
             </div>
@@ -238,6 +250,14 @@
                     <div class="col-6"><strong>状态:</strong> <span id="detail-status"></span></div>
                 </div>
                 <div class="row mb-3">
+                    <div class="col-6"><strong>会员等级:</strong> <span id="detail-level"></span> <span class="small" id="detail-level-src"></span></div>
+                    <div class="col-6"><strong>按规则应为:</strong> <span id="detail-auto-level"></span></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-6"><strong>单笔自助充值限额:</strong> <span id="detail-limit-per"></span></div>
+                    <div class="col-6"><strong>累计自助充值限额:</strong> <span id="detail-limit-total"></span></div>
+                </div>
+                <div class="row mb-3">
                     <div class="col-6"><strong>注册时间:</strong> <span id="detail-created"></span></div>
                     <div class="col-6"><strong>最后更新:</strong> <span id="detail-updated"></span></div>
                 </div>
@@ -278,15 +298,58 @@
             </div>
             <div class="modal-body">
                 <p class="mb-2">会员: <strong id="level-username"></strong></p>
-                <p class="mb-3">当前等级: <span id="level-current"></span></p>
+                <p class="mb-1">当前等级: <span id="level-current"></span></p>
+                <p class="mb-2 small text-muted">按规则应为: <span id="level-auto"></span></p>
+                <p class="mb-3 small" id="level-src-hint"></p>
                 <div class="mb-3">
                     <label class="form-label">选择新等级</label>
                     <select class="form-select" id="level-select"></select>
+                    <div class="form-text">仅列出已在「会员等级体系」中配置的等级，避免设了无折扣的空等级。</div>
+                </div>
+                <div class="alert alert-warning py-2 small mb-0" id="level-manual-hint">
+                    <i class="fas fa-info-circle"></i> 点「确认设置」后将标记为<b>手动设定</b>，自动升级规则不再改动此等级，直到你点「交还自动管理」。
                 </div>
             </div>
             <div class="modal-footer">
+                <button type="button" class="btn btn-outline-dark btn-sm me-auto" id="level-auto-btn" onclick="backToAutoLevel()"><i class="fas fa-undo"></i> 交还自动管理</button>
                 <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary btn-sm" onclick="submitSetLevel()">确认设置</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- [v1] 自助充值限额 Modal -->
+<div class="modal fade" id="rechargeLimitModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-sliders-h text-secondary"></i> 自助充值限额</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-1">会员: <strong id="limit-username"></strong></p>
+                <p class="mb-3 small text-muted" id="limit-used"></p>
+                <div class="row">
+                    <div class="col-6 mb-3">
+                        <label class="form-label">单笔限额（元）</label>
+                        <input type="number" class="form-control" id="limit-per" min="0" step="1" placeholder="0 = 不限">
+                    </div>
+                    <div class="col-6 mb-3">
+                        <label class="form-label">累计限额（元）</label>
+                        <input type="number" class="form-control" id="limit-total" min="0" step="1" placeholder="0 = 不限">
+                    </div>
+                </div>
+                <div class="alert alert-info py-2 small mb-0">
+                    <i class="fas fa-info-circle"></i>
+                    <b>0 = 不限</b>。限额只约束会员<b>自助充值</b>；<b>管理员手动加余额不受限</b>（大额请走线下转账后手动入账）。
+                    另有全局单笔上限（后台-设置）与个人限额<b>取小者</b>生效。
+                </div>
+                <div id="limit-msg" class="small text-danger mt-2" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary btn-sm" onclick="submitRechargeLimit()"><i class="fas fa-check"></i> 保存</button>
             </div>
         </div>
     </div>
@@ -301,6 +364,7 @@
     function logout() { if(confirm('确定要退出登录吗？')) { localStorage.removeItem('ADMIN_TOKEN'); window.location.href='/admin/index.html'; } }
 
     let currentEditId = null;
+    let levelEditSrc = 'auto';
     let memberLevelsConfig = [];
 
     async function loadMemberLevels() {
@@ -322,6 +386,27 @@
         if (!lv) return '<span class="badge bg-secondary">' + (idx === 0 ? '普通会员' : '等级' + idx) + '</span>';
         const colorClass = levelColors[idx % levelColors.length];
         return '<span class="badge ' + colorClass + '">' + escHtml(lv.name || ('等级' + idx)) + '</span>';
+    }
+
+    // [v1] 等级来源标记：manual = 管理员手动设定（自动升级不再改动）
+    function levelSrcTag(m) {
+        if ((m.level_source || 'auto') !== 'manual') return '';
+        return ' <span class="badge bg-dark" style="font-size:10px;" title="管理员手动设定，自动升级规则不会改动此等级">手动</span>';
+    }
+
+    // [v1] 自助充值限额文本（0 = 不限）
+    function limitText(m) {
+        const per = parseFloat(m.recharge_limit_per_tx) || 0;
+        const total = parseFloat(m.recharge_limit_total) || 0;
+        const used = parseFloat(m.total_recharge) || 0;
+        if (!per && !total) return '<span class="text-muted">不限</span>';
+        const parts = [];
+        if (per) parts.push('单笔 ' + per);
+        if (total) {
+            const pct = Math.min(100, Math.round(used / total * 100));
+            parts.push('累计 ' + used.toFixed(0) + '/' + total + '（' + pct + '%）');
+        }
+        return parts.join('<br>');
     }
 
     async function api(path, options = {}) {
@@ -355,14 +440,16 @@
             rows.push(`<tr class="${isFrozen ? 'table-secondary' : ''}">
                 <td>${m.id}</td>
                 <td><strong>${escHtml(m.email || m.username)}</strong>${frozenBadge}</td>
-                <td>${getLevelName(m.member_level || 0)}</td>
+                <td>${getLevelName(m.member_level || 0)}${levelSrcTag(m)}</td>
                 <td class="text-primary fw-bold">¥${parseFloat(m.balance).toFixed(2)}</td>
+                <td class="small">${limitText(m)}</td>
                 <td>${m.order_count || 0}</td>
                 <td class="text-nowrap">${time}</td>
                 <td>
                     <button class="btn btn-sm btn-outline-primary me-1" onclick="viewDetail(${m.id})" title="查看详情"><i class="fas fa-eye"></i></button>
                     <button class="btn btn-sm btn-outline-warning me-1 js-balance-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" data-balance="${m.balance}" title="调整余额"><i class="fas fa-coins"></i></button>
-                    <button class="btn btn-sm btn-outline-info me-1 js-level-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" data-level="${m.member_level || 0}" title="设置等级"><i class="fas fa-crown"></i></button>
+                    <button class="btn btn-sm btn-outline-info me-1 js-level-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" data-level="${m.member_level || 0}" data-auto="${m.auto_level || 0}" data-src="${attrEsc(m.level_source || 'auto')}" title="设置等级"><i class="fas fa-crown"></i></button>
+                    <button class="btn btn-sm btn-outline-secondary me-1 js-limit-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" data-per="${m.recharge_limit_per_tx || 0}" data-total="${m.recharge_limit_total || 0}" data-used="${m.total_recharge || 0}" title="充值限额"><i class="fas fa-sliders-h"></i></button>
                     ${freezeBtn}
                     <button class="btn btn-sm btn-outline-danger js-del-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" title="删除"><i class="fas fa-trash"></i></button>
                 </td>
@@ -385,7 +472,8 @@
             const id = parseInt(btn.dataset.id, 10);
             const name = btn.dataset.name || '';
             if (btn.classList.contains('js-balance-btn')) openBalance(id, name, parseFloat(btn.dataset.balance) || 0);
-            else if (btn.classList.contains('js-level-btn')) openSetLevel(id, name, parseInt(btn.dataset.level, 10) || 0);
+            else if (btn.classList.contains('js-level-btn')) openSetLevel(id, name, parseInt(btn.dataset.level, 10) || 0, parseInt(btn.dataset.auto, 10) || 0, btn.dataset.src || 'auto');
+            else if (btn.classList.contains('js-limit-btn')) openRechargeLimit(id, name, parseFloat(btn.dataset.per) || 0, parseFloat(btn.dataset.total) || 0, parseFloat(btn.dataset.used) || 0);
             else if (btn.classList.contains('js-del-btn')) deleteMember(id, name);
         });
     })();
@@ -394,6 +482,9 @@
     function openAddMember() {
         ['add-email', 'add-username', 'add-password', 'add-password2'].forEach(id => document.getElementById(id).value = '');
         document.getElementById('add-balance').value = '0';
+        // [v1] 充值限额默认留空（后端会继承站点默认值），0 = 不限
+        document.getElementById('add-limit-per').value = '';
+        document.getElementById('add-limit-total').value = '';
         const msgEl = document.getElementById('add-member-msg');
         msgEl.style.display = 'none';
         msgEl.textContent = '';
@@ -413,7 +504,14 @@
         const pwd2 = document.getElementById('add-password2').value;
         const balance = parseFloat(document.getElementById('add-balance').value) || 0;
         const level = parseInt(document.getElementById('add-level').value) || 0;
+        // [v1] 自助充值限额：留空 = 继承站点默认值
+        const lpEl = document.getElementById('add-limit-per').value;
+        const ltEl = document.getElementById('add-limit-total').value;
+        const limitPer = lpEl === '' ? null : parseFloat(lpEl);
+        const limitTotal = ltEl === '' ? null : parseFloat(ltEl);
         const fail = (t) => { msgEl.textContent = t; msgEl.style.display = ''; };
+        if (limitPer !== null && (isNaN(limitPer) || limitPer < 0)) return fail('单笔限额必须是不小于 0 的数字');
+        if (limitTotal !== null && (isNaN(limitTotal) || limitTotal < 0)) return fail('累计限额必须是不小于 0 的数字');
         if (!email) return fail('请输入邮箱');
         if (!/^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/.test(email)) return fail('邮箱格式不正确');
         if (pwd.length < 6) return fail('密码不能少于 6 位');
@@ -422,7 +520,7 @@
         if (balance < 0) return fail('初始余额不能为负数');
         const res = await api('member/add', {
             method: 'POST',
-            body: JSON.stringify({ email, username, password: pwd, balance, member_level: level })
+            body: JSON.stringify({ email, username, password: pwd, balance, member_level: level, recharge_limit_per_tx: limitPer, recharge_limit_total: limitTotal })
         });
         if (res.error) return fail(res.error);
         bootstrap.Modal.getInstance(document.getElementById('addMemberModal')).hide();
@@ -466,6 +564,18 @@
         document.getElementById('detail-username').textContent = u.username;
         document.getElementById('detail-email').textContent = u.email || '-';
         document.getElementById('detail-balance').textContent = parseFloat(u.balance).toFixed(2);
+        // [v1] 等级 + 来源 + 自助充值限额
+        document.getElementById('detail-level').innerHTML = getLevelName(u.member_level || 0);
+        document.getElementById('detail-auto-level').innerHTML = getLevelName(u.auto_level || 0);
+        document.getElementById('detail-level-src').innerHTML = (u.level_source === 'manual')
+            ? '<span class="badge bg-dark" style="font-size:10px;">手动设定</span>'
+            : '<span class="badge bg-success" style="font-size:10px;">自动管理</span>';
+        const dPer = parseFloat(u.recharge_limit_per_tx) || 0;
+        const dTotal = parseFloat(u.recharge_limit_total) || 0;
+        const dUsed = parseFloat(u.total_recharge) || 0;
+        document.getElementById('detail-limit-per').textContent = dPer > 0 ? (dPer + ' 元') : '不限';
+        document.getElementById('detail-limit-total').textContent = dTotal > 0
+            ? (dTotal + ' 元（已用 ' + dUsed.toFixed(2) + '）') : '不限';
         document.getElementById('detail-created').textContent = u.created_at ? new Date(u.created_at * 1000).toLocaleString('zh-CN') : '-';
         document.getElementById('detail-updated').textContent = u.updated_at ? new Date(u.updated_at * 1000).toLocaleString('zh-CN') : '-';
 
@@ -530,15 +640,24 @@
     // 设置等级
     let levelEditId = null;
 
-    function openSetLevel(id, username, currentLevel) {
+    function openSetLevel(id, username, currentLevel, autoLevel, levelSource) {
         levelEditId = id;
+        levelEditSrc = levelSource || 'auto';
         document.getElementById('level-username').textContent = username;
         document.getElementById('level-current').innerHTML = getLevelName(currentLevel);
+        document.getElementById('level-auto').innerHTML = getLevelName(autoLevel);
+        const srcHint = document.getElementById('level-src-hint');
+        const isManual = levelEditSrc === 'manual';
+        srcHint.innerHTML = isManual
+            ? '<span class="badge bg-dark">手动设定</span> <span class="text-muted">自动升级规则不会改动此等级。</span>'
+            : '<span class="badge bg-success">自动管理</span> <span class="text-muted">入金达到门槛时自动升级（只升不降）。</span>';
+        document.getElementById('level-auto-btn').style.display = isManual ? '' : 'none';
         const sel = document.getElementById('level-select');
         // [修复] 等级下拉 = member_levels 数组下标，不再重复插入固定“普通会员(0)”——
         // 否则配置的第 1 行与“普通会员”取值冲突（都是 0），设置后看起来“没效果”
+        // [v1] 只列已在会员等级体系中配置的等级，避免设了无折扣的空等级
         sel.innerHTML = (memberLevelsConfig || []).map((lv, i) =>
-            `<option value="${i}" ${currentLevel === i ? 'selected' : ''}>${escHtml(lv.name || ('等级' + i))}</option>`
+            lv ? `<option value="${i}" ${currentLevel === i ? 'selected' : ''}>${escHtml(lv.name || ('等级' + i))}</option>` : ''
         ).join('') || '<option value="0">普通会员</option>';
         new bootstrap.Modal(document.getElementById('levelModal')).show();
     }
@@ -551,6 +670,52 @@
         });
         if (res.error) { alert(res.error); return; }
         bootstrap.Modal.getInstance(document.getElementById('levelModal')).hide();
+        loadMembers();
+    }
+
+    // [v1] 交还自动管理：清除手动锁定，让自动升级规则重新接管
+    async function backToAutoLevel() {
+        if (!confirm('确认交还自动管理？\n\n交还后自动升级规则会重新接管该会员等级，但只提升、不降低已有等级。')) return;
+        const res = await api('member/level_auto', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: levelEditId })
+        });
+        if (res.error) { alert(res.error); return; }
+        bootstrap.Modal.getInstance(document.getElementById('levelModal')).hide();
+        loadMembers();
+    }
+
+    // [v1] 自助充值限额
+    let limitEditId = null;
+
+    function openRechargeLimit(id, username, per, total, used) {
+        limitEditId = id;
+        document.getElementById('limit-username').textContent = username;
+        document.getElementById('limit-per').value = per > 0 ? per : '';
+        document.getElementById('limit-total').value = total > 0 ? total : '';
+        document.getElementById('limit-used').textContent = total > 0
+            ? ('累计已自助充值 ' + used.toFixed(2) + ' / ' + total + ' 元')
+            : ('累计已自助充值 ' + used.toFixed(2) + ' 元（未设累计限额）');
+        const msg = document.getElementById('limit-msg');
+        msg.style.display = 'none';
+        new bootstrap.Modal(document.getElementById('rechargeLimitModal')).show();
+    }
+
+    async function submitRechargeLimit() {
+        const msg = document.getElementById('limit-msg');
+        const per = document.getElementById('limit-per').value === '' ? 0 : parseFloat(document.getElementById('limit-per').value);
+        const total = document.getElementById('limit-total').value === '' ? 0 : parseFloat(document.getElementById('limit-total').value);
+        if (isNaN(per) || per < 0 || isNaN(total) || total < 0) {
+            msg.textContent = '限额必须是不小于 0 的数字（0 表示不限）';
+            msg.style.display = '';
+            return;
+        }
+        const res = await api('member/recharge_limit', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: limitEditId, limit_per_tx: per, limit_total: total })
+        });
+        if (res.error) { msg.textContent = res.error; msg.style.display = ''; return; }
+        bootstrap.Modal.getInstance(document.getElementById('rechargeLimitModal')).hide();
         loadMembers();
     }
 

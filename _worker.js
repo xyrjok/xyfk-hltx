@@ -144,7 +144,7 @@ async function memberAuth(request, env, db) {
     const token = authHeader.substring(7);
     const userId = await verifyToken(token, env);
     if (!userId) return null;
-    const user = await db.prepare('SELECT id, username, email, balance, frozen, member_level, created_at, updated_at FROM users WHERE id=?').bind(userId).first();
+    const user = await db.prepare('SELECT id, username, email, balance, frozen, member_level, auto_level, level_source, recharge_limit_per_tx, recharge_limit_total, total_recharge, total_incoming, created_at, updated_at FROM users WHERE id=?').bind(userId).first();
     if (!user) return null;
     if (user.frozen === 1) return null;
     return user;
@@ -975,6 +975,14 @@ async function ensureMemberTables(db) {
             frozen INTEGER DEFAULT 0,
             member_level INTEGER DEFAULT 0,
             total_recharge REAL DEFAULT 0,
+            -- [v1] 自助充值限额：单笔/累计，0 = 不限
+            recharge_limit_per_tx REAL DEFAULT 0,
+            recharge_limit_total REAL DEFAULT 0,
+            -- [v1] 等级来源：auto = 自动升级规则管；manual = 管理员手动设定（优先级最高）
+            auto_level INTEGER DEFAULT 0,
+            level_source TEXT DEFAULT 'auto',
+            -- [v1] 累计入金 = 自助充值 + 管理员手动加余额（自动升级规则的判定口径）
+            total_incoming REAL DEFAULT 0,
             created_at INTEGER,
             updated_at INTEGER
         )`).run();
@@ -996,6 +1004,12 @@ async function ensureMemberTables(db) {
         'ALTER TABLE users ADD COLUMN frozen INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN member_level INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN total_recharge REAL DEFAULT 0',
+        // [v1] 自助充值限额 + 等级来源 + 累计入金
+        'ALTER TABLE users ADD COLUMN recharge_limit_per_tx REAL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN recharge_limit_total REAL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN auto_level INTEGER DEFAULT 0',
+        "ALTER TABLE users ADD COLUMN level_source TEXT DEFAULT 'auto'",
+        'ALTER TABLE users ADD COLUMN total_incoming REAL DEFAULT 0',
         'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)',
         'ALTER TABLE orders ADD COLUMN user_id INTEGER',
         // [性能优化] 会员列表/详情的关联查询走索引，避免 orders 增长后逐行全表扫描
@@ -1004,6 +1018,24 @@ async function ensureMemberTables(db) {
         'CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)'
     ]) {
         try { await db.prepare(ddl).run(); } catch(e) {}
+    }
+    // [v1] 存量数据一次性回填（幂等：用 site_config 打标，只跑一次）
+    try {
+        const migFlag = await db.prepare("SELECT value FROM site_config WHERE key='member_migration_v1'").first();
+        if (!migFlag) {
+            // 回填 auto_level / total_incoming，并保留管理员已设置的等级（level_source 默认 auto，不影响现有 member_level）
+            await db.prepare('UPDATE users SET auto_level = member_level WHERE member_level > 0').run();
+            await db.prepare('UPDATE users SET total_incoming = total_recharge WHERE total_recharge > 0').run();
+            await db.prepare("INSERT OR IGNORE INTO site_config (key, value) VALUES ('member_migration_v1','1')").run();
+        }
+    } catch(e) {}
+    // [v1] 站点级默认值（新会员继承；后台可逐会员覆盖）
+    for (const [k, v] of [
+        ['member_recharge_limit_per_tx_default', '0'],   // 新会员默认单笔自助充值限额，0=不限
+        ['member_recharge_limit_total_default',  '0'],   // 新会员默认累计自助充值限额，0=不限
+        ['recharge_max_per_tx',                  '10000'] // 全局单笔充值上限（与会员个人限额取小者）
+    ]) {
+        try { await db.prepare('INSERT OR IGNORE INTO site_config (key, value) VALUES (?, ?)').bind(k, v).run(); } catch(e) {}
     }
     _memberSchemaEnsured = true;
 }
@@ -1080,6 +1112,67 @@ function attachMemberPricing(product, variants, discount) {
                 }).filter(Boolean);
             }
         }
+    }
+}
+
+// === [v1] 会员等级：自动升级统一入口 ===
+// 判定口径：total_incoming（累计入金 = 自助充值 + 管理员手动加余额）
+// 优先级规则（最高优先级：管理员手动设定）：
+//   - level_source='manual'（管理员手动设过）→ 自动规则【绝不】写 member_level，只更新 auto_level 供查看
+//   - level_source='auto'                      → 自动规则可写 member_level，但只升不降
+// 返回当前生效等级（失败返回 null）
+async function applyAutoUpgrade(db, userId) {
+    try {
+        const rulesRow = await db.prepare("SELECT value FROM site_config WHERE key='member_upgrade_rules'").first();
+        if (!rulesRow || !rulesRow.value) return null;
+        let rules;
+        try { rules = JSON.parse(rulesRow.value); } catch (e) { return null; }
+        if (!Array.isArray(rules) || rules.length === 0) return null;
+
+        const u = await db.prepare('SELECT member_level, auto_level, level_source, total_incoming FROM users WHERE id=?').bind(userId).first();
+        if (!u) return null;
+
+        // 按当前规则从零重算「应得等级」（不累加，规则调整后下次调用立即生效）
+        const incoming = parseFloat(u.total_incoming) || 0;
+        let auto = 0;
+        for (const r of rules) {
+            const amt = parseFloat(r.amount), lv = parseInt(r.level);
+            if (!isNaN(amt) && !isNaN(lv) && incoming >= amt && lv > auto) auto = lv;
+        }
+
+        const isManual = u.level_source === 'manual';
+        const cur = parseInt(u.member_level) || 0;
+        // 自动模式：同步 member_level（只升不降）；手动模式：member_level 一字不改
+        const next = isManual ? cur : Math.max(cur, auto);
+
+        await db.prepare('UPDATE users SET auto_level=?, member_level=?, updated_at=? WHERE id=?')
+            .bind(auto, next, time(), userId).run();
+        return next;
+    } catch (e) {
+        console.error('applyAutoUpgrade failed:', e);
+        return null;
+    }
+}
+
+// === [v1] 等级配置校验：只允许 member_levels 里已配置的等级 ===
+// 防止管理员设成 V9 而 member_levels 只配到 V5，导致 resolveMemberDiscount 静默返回 100（无折扣）。
+// 返回 {ok:true, levels:[...]} 或 {ok:false, error:'...'}
+async function validateMemberLevel(db, level) {
+    const lv = parseInt(level);
+    if (isNaN(lv) || lv < 0) return { ok: false, error: '等级必须是不小于 0 的整数' };
+    try {
+        const row = await db.prepare("SELECT value FROM site_config WHERE key='member_levels'").first();
+        if (!row || !row.value) return { ok: true, levels: [], note: '未配置会员等级体系，允许任意等级' };
+        const levels = JSON.parse(row.value);
+        if (!levels || typeof levels !== 'object') return { ok: true, levels: [] };
+        const allowed = Object.keys(levels).map(n => parseInt(n)).filter(n => !isNaN(n)).sort((a, b) => a - b);
+        if (allowed.length === 0) return { ok: true, levels: [] };
+        if (!allowed.includes(lv)) {
+            return { ok: false, error: '等级 ' + lv + ' 未在会员等级体系中配置（可选：' + allowed.join(', ') + '），否则该会员将按无折扣计价' };
+        }
+        return { ok: true, levels: allowed };
+    } catch (e) {
+        return { ok: true, levels: [] }; // 校验失败不阻断业务
     }
 }
 
@@ -2353,7 +2446,7 @@ async function handleApi(request, env, url, ctx) {
             // === 会员管理 API (Admin) ===
             // [新增] 添加会员（管理员手动创建）
             if (path === '/api/admin/member/add' && method === 'POST') {
-                const { username, email, password, balance, member_level } = await request.json();
+                const { username, email, password, balance, member_level, recharge_limit_per_tx, recharge_limit_total } = await request.json();
                 if (!email || !password) return errRes('邮箱和密码不能为空');
                 // [安全加固] 邮箱白名单字符，与注册接口保持一致
                 if (!/^[A-Za-z0-9._%+\-\u4e00-\u9fa5]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/.test(email)) return errRes('请输入有效的邮箱地址');
@@ -2363,6 +2456,17 @@ async function handleApi(request, env, url, ctx) {
                 if (initialBalance < 0) return errRes('初始余额不能为负数');
                 const initialLevel = parseInt(member_level) || 0;
                 if (initialLevel < 0) return errRes('等级不能为负数');
+                // [v1] 等级必须已在会员等级体系中配置，否则会静默无折扣
+                const lvlCheck = await validateMemberLevel(db, initialLevel);
+                if (!lvlCheck.ok) return errRes(lvlCheck.error);
+                // [v1] 自助充值限额：未传则继承站点默认值
+                const limRow = await db.prepare("SELECT key, value FROM site_config WHERE key IN ('member_recharge_limit_per_tx_default','member_recharge_limit_total_default')").all();
+                const limDef = {}; (limRow.results || []).forEach(r => limDef[r.key] = parseFloat(r.value) || 0);
+                const limPerTx = (recharge_limit_per_tx !== undefined && recharge_limit_per_tx !== null && recharge_limit_per_tx !== '')
+                    ? (parseFloat(recharge_limit_per_tx) || 0) : (limDef.member_recharge_limit_per_tx_default || 0);
+                const limTotal = (recharge_limit_total !== undefined && recharge_limit_total !== null && recharge_limit_total !== '')
+                    ? (parseFloat(recharge_limit_total) || 0) : (limDef.member_recharge_limit_total_default || 0);
+                if (limPerTx < 0 || limTotal < 0) return errRes('充值限额不能为负数');
                 // 列/索引兼容已由 ensureMemberTables 统一处理（每个实例仅一次），不再逐请求 ALTER
                 const existing = await db.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
                 if (existing) return errRes('该邮箱已注册');
@@ -2378,7 +2482,7 @@ async function handleApi(request, env, url, ctx) {
                 const passwordHash = await hashPassword(password, env);
                 const passwordEncrypted = await encryptPassword(password, env);
                 const now = time();
-                const result = await db.prepare('INSERT INTO users (username, password_hash, password_encrypted, email, balance, frozen, member_level, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)').bind(finalUsername, passwordHash, passwordEncrypted, email, initialBalance, initialLevel, now, now).run();
+                const result = await db.prepare('INSERT INTO users (username, password_hash, password_encrypted, email, balance, frozen, member_level, auto_level, level_source, recharge_limit_per_tx, recharge_limit_total, total_recharge, total_incoming, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 0, 0, ?, ?)').bind(finalUsername, passwordHash, passwordEncrypted, email, initialBalance, initialLevel, initialLevel, 'auto', limPerTx, limTotal, now, now).run();
                 const userId = result.meta.last_row_id;
                 // 初始余额记入流水，便于对账
                 if (initialBalance > 0) {
@@ -2391,7 +2495,7 @@ async function handleApi(request, env, url, ctx) {
             if (path === '/api/admin/members/list') {
                 const search = url.searchParams.get('search') || '';
                 // frozen/member_level/total_recharge 列已由 ensureMemberTables 统一兼容（每个实例仅一次），不再逐请求 ALTER
-                let query = 'SELECT u.id, u.username, u.email, u.balance, u.frozen, u.member_level, u.total_recharge, u.created_at, u.updated_at, (SELECT COUNT(*) FROM orders WHERE user_id=u.id) as order_count FROM users u';
+                let query = 'SELECT u.id, u.username, u.email, u.balance, u.frozen, u.member_level, u.auto_level, u.level_source, u.recharge_limit_per_tx, u.recharge_limit_total, u.total_recharge, u.total_incoming, u.created_at, u.updated_at, (SELECT COUNT(*) FROM orders WHERE user_id=u.id) as order_count FROM users u';
                 let params = [];
                 if (search) {
                     query += ' WHERE u.username LIKE ? OR u.email LIKE ?';
@@ -2415,7 +2519,7 @@ async function handleApi(request, env, url, ctx) {
                 const id = url.searchParams.get('id');
                 if (!id) return errRes('缺少会员ID');
                 // 列兼容已由 ensureMemberTables 统一处理，不再逐请求 ALTER
-                const user = await db.prepare('SELECT id, username, email, balance, frozen, member_level, total_recharge, password_encrypted, created_at, updated_at FROM users WHERE id=?').bind(id).first();
+                const user = await db.prepare('SELECT id, username, email, balance, frozen, member_level, auto_level, level_source, recharge_limit_per_tx, recharge_limit_total, total_recharge, total_incoming, password_encrypted, created_at, updated_at FROM users WHERE id=?').bind(id).first();
                 if (!user) return errRes('会员不存在');
                 user.password_plaintext = user.password_encrypted ? await decryptPassword(user.password_encrypted, env) : null;
                 delete user.password_encrypted;
@@ -2442,6 +2546,12 @@ async function handleApi(request, env, url, ctx) {
                 // 记录流水
                 const txAmount = adjust_type === 'subtract' ? -amount : (adjust_type === 'add' ? amount : amount - member.balance);
                 await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, created_at) VALUES (?, ?, ?, ?, ?)').bind(user_id, txAmount, 'admin_adjust', description || '管理员手动调整', now).run();
+                // [v1] 手动「加余额」计入累计入金（口径：自助充值 + 手动加余额都算入金，用于自动升级判定）。
+                //      subtract / set 不计入：扣余额不是出金；set 无法推断入金金额。
+                if (adjust_type === 'add') {
+                    await db.prepare('UPDATE users SET total_incoming = total_incoming + ? WHERE id=?').bind(amount, user_id).run();
+                    await applyAutoUpgrade(db, user_id);
+                }
                 return jsonRes({ success: true, new_balance: newBalance });
             }
 
@@ -2484,11 +2594,43 @@ async function handleApi(request, env, url, ctx) {
             if (path === '/api/admin/member/set_level' && method === 'POST') {
                 const { user_id, member_level } = await request.json();
                 if (user_id === undefined || member_level === undefined) return errRes('参数不完整');
-                if (member_level < 0) return errRes('等级不能为负数');
+                const newLv = parseInt(member_level);
+                if (isNaN(newLv) || newLv < 0) return errRes('等级不能为负数');
+                // [v1] 等级必须已在会员等级体系中配置，否则该会员会静默无折扣
+                const lvlCheck2 = await validateMemberLevel(db, newLv);
+                if (!lvlCheck2.ok) return errRes(lvlCheck2.error);
                 const member = await db.prepare('SELECT id FROM users WHERE id=?').bind(user_id).first();
                 if (!member) return errRes('会员不存在');
-                await db.prepare('UPDATE users SET member_level=?, updated_at=? WHERE id=?').bind(member_level, time(), user_id).run();
-                return jsonRes({ success: true, member_level });
+                // [v1] 管理员手动设定 = 最高优先级：写 level_source='manual'，
+                //      自动升级规则从此【绝不】再改 member_level，直到管理员点「交还自动管理」。
+                await db.prepare("UPDATE users SET member_level=?, level_source='manual', updated_at=? WHERE id=?").bind(newLv, time(), user_id).run();
+                return jsonRes({ success: true, member_level: newLv, level_source: 'manual' });
+            }
+
+            // [v1] 设置自助充值限额（单笔 + 累计，0 = 不限）
+            if (path === '/api/admin/member/recharge_limit' && method === 'POST') {
+                const { user_id, limit_per_tx, limit_total } = await request.json();
+                if (user_id === undefined) return errRes('缺少会员ID');
+                const lp = (limit_per_tx === null || limit_per_tx === undefined || limit_per_tx === '') ? 0 : parseFloat(limit_per_tx);
+                const lt = (limit_total === null || limit_total === undefined || limit_total === '') ? 0 : parseFloat(limit_total);
+                if (isNaN(lp) || lp < 0 || isNaN(lt) || lt < 0) return errRes('充值限额必须是不小于 0 的数字（0 表示不限）');
+                const member2 = await db.prepare('SELECT id FROM users WHERE id=?').bind(user_id).first();
+                if (!member2) return errRes('会员不存在');
+                await db.prepare('UPDATE users SET recharge_limit_per_tx=?, recharge_limit_total=?, updated_at=? WHERE id=?').bind(lp, lt, time(), user_id).run();
+                return jsonRes({ success: true, recharge_limit_per_tx: lp, recharge_limit_total: lt });
+            }
+
+            // [v1] 交还自动管理：清除管理员手动锁定，让自动升级规则重新接管。
+            //      语义：自动规则可继续【提升】等级，但不会降低已有等级（与历史行为一致）。
+            if (path === '/api/admin/member/level_auto' && method === 'POST') {
+                const { user_id } = await request.json();
+                if (user_id === undefined) return errRes('缺少会员ID');
+                const member3 = await db.prepare('SELECT id FROM users WHERE id=?').bind(user_id).first();
+                if (!member3) return errRes('会员不存在');
+                await db.prepare("UPDATE users SET level_source='auto', updated_at=? WHERE id=?").bind(time(), user_id).run();
+                await applyAutoUpgrade(db, user_id);
+                const after = await db.prepare('SELECT member_level, auto_level, level_source FROM users WHERE id=?').bind(user_id).first();
+                return jsonRes({ success: true, member_level: after.member_level, auto_level: after.auto_level, level_source: after.level_source });
             }
         }
         // ===========================
@@ -2835,9 +2977,29 @@ async function handleApi(request, env, url, ctx) {
             if (!user) return errRes('请先登录', 401);
             if (user.frozen === 1) return errRes('账户已被冻结，无法充值，请联系客服', 403);
             const { amount, payment_method } = await request.json();
-            if (!amount || amount < 1) return errRes('充值金额最低1元');
-            if (amount > 10000) return errRes('单次充值不能超过10000元');
+            const amt = parseFloat(amount);
+            if (!amt || isNaN(amt)) return errRes('充值金额格式不正确');
+            if (amt < 1) return errRes('充值金额最低1元');
             if (!payment_method) return errRes('请选择支付方式');
+
+            // === [v1] 自助充值限额校验 ===
+            // ⚠️ 铁律：只在【建单前】校验，绝不在支付回调里拦——否则用户已付款却不入账，是资损事故。
+            const maxRow = await db.prepare("SELECT value FROM site_config WHERE key='recharge_max_per_tx'").first();
+            const globalMax = parseFloat(maxRow && maxRow.value) || 10000;
+            const perTx = parseFloat(user.recharge_limit_per_tx) || 0;
+            const cap = perTx > 0 ? Math.min(perTx, globalMax) : globalMax;
+            if (amt > cap) {
+                return errRes((perTx > 0 && perTx < globalMax)
+                    ? '单笔自助充值不能超过 ' + cap + ' 元，大额充值请联系管理员线下入账'
+                    : '单次充值不能超过 ' + cap + ' 元', 403);
+            }
+            const limitTotal = parseFloat(user.recharge_limit_total) || 0;
+            if (limitTotal > 0) {
+                const already = parseFloat(user.total_recharge) || 0;
+                if (already + amt > limitTotal) {
+                    return errRes('累计自助充值已达上限 ' + limitTotal + ' 元（已用 ' + already.toFixed(2) + '），大额充值请联系管理员线下入账', 403);
+                }
+            }
             // 校验支付方式必须开启了"会员充值"开关
             await ensurePayGatewayColumns(db);
             const rechargeGw = await db.prepare("SELECT id FROM pay_gateways WHERE id=? AND active=1 AND member_recharge=1").bind(payment_method).first()
@@ -2846,8 +3008,8 @@ async function handleApi(request, env, url, ctx) {
             const order_id = uuid();
             const now = time();
             const contact = user.email || user.username;
-            await db.prepare('INSERT INTO orders (id, variant_id, product_name, variant_name, price, quantity, total_amount, contact, query_password, payment_method, created_at, status, user_id) VALUES (?, 0, ?, ?, ?, 1, ?, ?, ?, ?, ?, 0, ?)').bind(order_id, '会员充值', '充值' + amount + '元', amount, amount.toFixed(2), contact, 'balance_recharge', payment_method, now, user.id).run();
-            return jsonRes({ order_id, total_amount: amount.toFixed(2), payment_method });
+            await db.prepare('INSERT INTO orders (id, variant_id, product_name, variant_name, price, quantity, total_amount, contact, query_password, payment_method, created_at, status, user_id) VALUES (?, 0, ?, ?, ?, 1, ?, ?, ?, ?, ?, 0, ?)').bind(order_id, '会员充值', '充值' + amt + '元', amt, amt.toFixed(2), contact, 'balance_recharge', payment_method, now, user.id).run();
+            return jsonRes({ order_id, total_amount: amt.toFixed(2), payment_method });
         }
 
         // 余额支付 (原子扣减)
@@ -2917,28 +3079,8 @@ async function handleApi(request, env, url, ctx) {
             }
             deductApplied = true;
             newBalance = (await db.prepare('SELECT balance FROM users WHERE id=?').bind(user.id).first()).balance;
-            // 充值/消费后自动升级检查
-            try {
-                // [修改] 自动升级不受“会员系统”总开关限制（总开关仅管注册），由升级规则自身的金额门槛控制
-                {
-                    const rulesRow = await db.prepare("SELECT value FROM site_config WHERE key='member_upgrade_rules'").first();
-                    if (rulesRow && rulesRow.value) {
-                        const rules = JSON.parse(rulesRow.value);
-                        const userData = await db.prepare('SELECT total_recharge, member_level FROM users WHERE id=?').bind(user.id).first();
-                        if (userData && rules.length > 0) {
-                            let newLevel = userData.member_level || 0;
-                            for (const rule of rules) {
-                                if (userData.total_recharge >= rule.amount && rule.level > newLevel) {
-                                    newLevel = rule.level;
-                                }
-                            }
-                            if (newLevel > (userData.member_level || 0)) {
-                                await db.prepare('UPDATE users SET member_level=? WHERE id=?').bind(newLevel, user.id).run();
-                            }
-                        }
-                    }
-                }
-            } catch(e) { console.error('Auto upgrade check failed:', e); }
+            // [v1] 已移除「消费后自动升级检查」：消费不改变 total_incoming（累计入金），
+            //      升级判定只在【入金发生后】触发（三个支付回调 + 管理员手动加余额）。
             // 更新订单状态（仅当仍处于处理中，幂等保护）
             await db.prepare('UPDATE orders SET status=1, paid_at=? WHERE id=? AND status=9').bind(time(), order_id).run();
             } catch (e) {
@@ -3773,23 +3915,10 @@ async function handleApi(request, env, url, ctx) {
                     const rechargeAmount = order.total_amount;
                     const currentBalance = (await db.prepare('SELECT balance FROM users WHERE id=?').bind(order.user_id).first()).balance || 0;
                     await db.prepare('UPDATE users SET balance=?, updated_at=? WHERE id=?').bind(currentBalance + rechargeAmount, time(), order.user_id).run();
-                    await db.prepare('UPDATE users SET total_recharge = total_recharge + ? WHERE id=?').bind(rechargeAmount, order.user_id).run();
+                    await db.prepare('UPDATE users SET total_recharge = total_recharge + ?, total_incoming = total_incoming + ? WHERE id=?').bind(rechargeAmount, rechargeAmount, order.user_id).run();
                     await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(order.user_id, rechargeAmount, 'recharge', '充值' + rechargeAmount + '元', out_trade_no, time()).run();
-                    try {
-                        // [修改] 自动升级不受“会员系统”总开关限制（总开关仅管注册），由升级规则自身的金额门槛控制
-                        {
-                            const rlRow = await db.prepare("SELECT value FROM site_config WHERE key='member_upgrade_rules'").first();
-                            if (rlRow && rlRow.value) {
-                                const rules = JSON.parse(rlRow.value);
-                                const ud = await db.prepare('SELECT total_recharge, member_level FROM users WHERE id=?').bind(order.user_id).first();
-                                if (ud && rules.length > 0) {
-                                    let nl = ud.member_level || 0;
-                                    for (const r of rules) { if (ud.total_recharge >= r.amount && r.level > nl) nl = r.level; }
-                                    if (nl > (ud.member_level || 0)) await db.prepare('UPDATE users SET member_level=? WHERE id=?').bind(nl, order.user_id).run();
-                                }
-                            }
-                        }
-                    } catch(e) {}
+                    // [v1] 自动升级统一入口：口径 total_incoming；管理员手动设定（level_source='manual'）优先级最高
+                    await applyAutoUpgrade(db, order.user_id);
                     return new Response('success');
                 }
                 
@@ -4149,23 +4278,10 @@ ${cardContentForCustomer}
                         const rechargeAmount = order.total_amount;
                         const currentBalance = (await db.prepare('SELECT balance FROM users WHERE id=?').bind(order.user_id).first()).balance || 0;
                         await db.prepare('UPDATE users SET balance=?, updated_at=? WHERE id=?').bind(currentBalance + rechargeAmount, time(), order.user_id).run();
-                        await db.prepare('UPDATE users SET total_recharge = total_recharge + ? WHERE id=?').bind(rechargeAmount, order.user_id).run();
+                        await db.prepare('UPDATE users SET total_recharge = total_recharge + ?, total_incoming = total_incoming + ? WHERE id=?').bind(rechargeAmount, rechargeAmount, order.user_id).run();
                         await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(order.user_id, rechargeAmount, 'recharge', '充值' + rechargeAmount + '元', out_trade_no, time()).run();
-                        try {
-                            // [修改] 自动升级不受“会员系统”总开关限制（总开关仅管注册），由升级规则自身的金额门槛控制
-                            {
-                                const rlRow2 = await db.prepare("SELECT value FROM site_config WHERE key='member_upgrade_rules'").first();
-                                if (rlRow2 && rlRow2.value) {
-                                    const rules2 = JSON.parse(rlRow2.value);
-                                    const ud2 = await db.prepare('SELECT total_recharge, member_level FROM users WHERE id=?').bind(order.user_id).first();
-                                    if (ud2 && rules2.length > 0) {
-                                        let nl2 = ud2.member_level || 0;
-                                        for (const r of rules2) { if (ud2.total_recharge >= r.amount && r.level > nl2) nl2 = r.level; }
-                                        if (nl2 > (ud2.member_level || 0)) await db.prepare('UPDATE users SET member_level=? WHERE id=?').bind(nl2, order.user_id).run();
-                                    }
-                                }
-                            }
-                        } catch(e) {}
+                        // [v1] 自动升级统一入口
+                        await applyAutoUpgrade(db, order.user_id);
                         return new Response(JSON.stringify({code: 200, msg: "success"}));
                     }
                     if (order) {
@@ -4306,23 +4422,10 @@ ${cardContentForCustomer}
                     const rechargeAmount = paidOrder.total_amount;
                     const currentBalance = (await db.prepare('SELECT balance FROM users WHERE id=?').bind(paidOrder.user_id).first()).balance || 0;
                     await db.prepare('UPDATE users SET balance=?, updated_at=? WHERE id=?').bind(currentBalance + rechargeAmount, time(), paidOrder.user_id).run();
-                    await db.prepare('UPDATE users SET total_recharge = total_recharge + ? WHERE id=?').bind(rechargeAmount, paidOrder.user_id).run();
+                    await db.prepare('UPDATE users SET total_recharge = total_recharge + ?, total_incoming = total_incoming + ? WHERE id=?').bind(rechargeAmount, rechargeAmount, paidOrder.user_id).run();
                     await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(paidOrder.user_id, rechargeAmount, 'recharge', '充值' + rechargeAmount + '元', out_trade_no, time()).run();
-                    try {
-                        // [修改] 自动升级不受“会员系统”总开关限制（总开关仅管注册），由升级规则自身的金额门槛控制
-                        {
-                            const rlRow3 = await db.prepare("SELECT value FROM site_config WHERE key='member_upgrade_rules'").first();
-                            if (rlRow3 && rlRow3.value) {
-                                const rules3 = JSON.parse(rlRow3.value);
-                                const ud3 = await db.prepare('SELECT total_recharge, member_level FROM users WHERE id=?').bind(paidOrder.user_id).first();
-                                if (ud3 && rules3.length > 0) {
-                                    let nl3 = ud3.member_level || 0;
-                                    for (const r of rules3) { if (ud3.total_recharge >= r.amount && r.level > nl3) nl3 = r.level; }
-                                    if (nl3 > (ud3.member_level || 0)) await db.prepare('UPDATE users SET member_level=? WHERE id=?').bind(nl3, paidOrder.user_id).run();
-                                }
-                            }
-                        }
-                    } catch(e) {}
+                    // [v1] 自动升级统一入口
+                    await applyAutoUpgrade(db, paidOrder.user_id);
                     return new Response('success');
                 }
                 if (paidOrder) {

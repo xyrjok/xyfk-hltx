@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS pay_gateways (
 );
 
 -- 11.5 支付网关初始数据
-INSERT OR IGNORE INTO pay_gateways (id, name, type, config, active, remark, sort) VALUES (1, '支付宝', 'alipay_f2f', '{"icon":"/assets/alipay.webp","app_id":"2019090466899782","private_key":"MIIEowIBAAKCAQEAq3Ho3l3B3duoyWlP7MsrlAxbnr1xNaMOB8MkdYKuTCdEZGvF4VmC0PFMRmKsXb9GRi1F6tqdrLKCPty73mslRh2xrNugXr3zkLH1/dvpTPK+q7HBvOY26lvqc9qUU8pZ/Cmbbg1HcqsJQy2fySl+VyTy4GgQaNEkny/lpfEUAu3fsaC28qOqY3cd4Y574Mp0XN7ntwhp7T1dGdXXcpgjpu6eeEZ4Suwa3+SqzTV7xheEiDZzcX5ZS1enb6NHOcSga1D1rVjxiMNGhzJtb2vPEgbrcgl7nwFmbR5NwQzSHslrcxUw0ArAOBtsUlRQxF3iaJw4t3r30VGoFI11rKmNVQIDAQABAoIBAQCnxFDvAGpMcr3JUh+fBPWA61LglFrq9MMu/1t3DkkHRkmbxwadTR1A308XdUlcd2cKFxVbC1DOBOSFJTVGIi0YXshV8ZkN/O0SA8NHBmJXJRdGJi0Cb3j/frB/bD5HfDTwF7r8R0xKPmpS7Zt1mwABwKtWwx6Do10l1RXxe2ZsscVr5dZ7/LB0j/HDDGKqCR73KYZ1cQOr3FOOfXuNu/pk5wbrqk7RZDcEF1SaSdiUZHCCaOXwlfyqwyTP0ecKxXc2G/JzP8s2JWoOFlYgMjUUGgJjPfTTULthtG+qB4UTtpIE8IQ8DIaN1/N22/msF0opm3v5avOO5XMx/j2H40jFAoGBANSXKxynps7/UipPHQ03HYkEmnfYI1kpxKVXp9PJ4pj5oqbIfUOLD39+vEd64ddv4BpB5CGunNLFX77nR+cXuMzYxI8piWL0sm+KCYlINVVXExBDlmT3EeHJZ0qafMnL7NKs3fcJjZSdBciUi8VXTZgSmqOE9Tq6SjqwV0R8wfNbAoGBAM5z7FibqnfGKoXTIEiVQxmTuDzLnMPYctkgf5+B1KIwdWZA6n3y5rFTS/fnKg47J+Ebqcp6779S9SK93E3eII9huUdCEYAISxqOfRsibukwXCH90t9GuXAiv2K8s9vXf+dQwxIcOvvAEiAlv7JViTOtwo2xb1g1hMEhWc4eDdEPAoGAY1KZPtMJOS7KmZ/Kx/DXKLvw20stAKxmBoXUkDuDVctT9a438AWZYQy6NH8x4rCPOFVOm3n0JPk4CX4O9uX7XiFsfCKA4K3IbBpG6E/HMy7yZifdrSBNx3qMequA39sZszg2oANjlWpjWFomjzWBuCoA+6LT2/NLWO4oZ4QOLX8CgYBm9dEs75U4Xo/eZch36liobM85IqJv2YaNWnPLbMhKirhB4qYPYhBC5zO/0n1a042z6kPnQyBF3m16gg1YmCrM1wO70etAWuJ5wA4MdkOx7/hCy39a8r6QegPQjiN0xCh5iAGBCqsv2j4v4iOUIKxoJYQdfhv1ddtbJfLPpJVnaQKBgB6L4H9IlLm+bAVJUdsqS7JdIubaTA7fJkM1nl5S7qm2z4H+Vn2sFJ+R1++Ghu9eXWguzcJ0Iy5w5LOAdmxT4yzLIMYvLmeOJkCr2wuyh5oaIKU8Tzv6qcXEWRQMLEaXfspqzGOLxWEo8sWQLd/1I7J3MoID3FzCddjoevIVuFKh","alipay_public_key":"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvzuJKibRBk0tOkIVRdIJk6A7SegTu6ANcQ5t2sBLuS8mBn/zK/l5msIIWxlpXkl5xbp67jrzonH8w4BeMcQDhv1wMpW3u6KWsxae1FV+3c+rpvcSOei4QXxqWXswQVmj2kkkjF3VXi5+KaUjxWjWcuJtsl/4MAMNb+3TdOTuMGTxeg1yM+UceeJwF20cpKMQIJ7ZADImX8+sKluDAYzkBxbAsxbiAqney6SLL0YPWbeqEGLxigXxfnwLR//o854rupcujWO3u+gizNG/VraQGLfYJ1Rlpu0icOkYsESCqsnLDMcMtV/uKm47yKcBxj+408qS5wGAzTtKX5qNlS1o8QIDAQAB"}', 1, '需要改成自己的支付宝当面付', 0);
+INSERT OR IGNORE INTO pay_gateways (id, name, type, config, active, remark, sort) VALUES (1, '支付宝', 'alipay_f2f', '{"icon":"/assets/alipay.webp","app_id":"请填入你的支付宝AppID","private_key":"请填入你的支付宝应用私钥(应用私钥)","alipay_public_key":"请填入你的支付宝公钥"}', 1, '【必填】请在后台-支付网关中填入你自己的支付宝当面付密钥；切勿提交明文密钥到仓库', 0);
 
 -- 12. 系统配置表 (并初始化必填项)
 CREATE TABLE IF NOT EXISTS site_config (
@@ -206,6 +206,9 @@ INSERT OR IGNORE INTO site_config (key, value) VALUES
 ('show_site_logo', '1'),
 ('admin_captcha_active', '1'),
 ('member_discount', '100'),
+('member_recharge_limit_per_tx_default', '0'),
+('member_recharge_limit_total_default', '0'),
+('recharge_max_per_tx', '10000'),
 ('footer_html', '<div class="footer-links"><a href="/custom?alias=terms" target="_blank">服务条款</a> <a href="/custom?alias=disclaimer" target="_blank">免责声明</a> <a href="/custom?alias=about-us" target="_blank">关于我们</a><p>Copyright @ 2026<a href="/" target="_blank">夏雨自动发卡系统</a>欢迎选购！</p></div>');
 
 -- 13. 会员表
@@ -217,6 +220,16 @@ CREATE TABLE IF NOT EXISTS users (
     email               TEXT UNIQUE,
     balance             REAL DEFAULT 0,
     frozen              INTEGER DEFAULT 0,
+    member_level        INTEGER DEFAULT 0,
+    total_recharge      REAL DEFAULT 0,
+    -- [v1] 自助充值限额：单笔/累计，0 = 不限（仅约束会员自助充值，管理员手动加余额不受限）
+    recharge_limit_per_tx REAL DEFAULT 0,
+    recharge_limit_total  REAL DEFAULT 0,
+    -- [v1] 等级来源：auto = 自动升级规则管；manual = 管理员手动设定（优先级最高，自动规则不再改动）
+    auto_level          INTEGER DEFAULT 0,
+    level_source        TEXT DEFAULT 'auto',
+    -- [v1] 累计入金 = 自助充值 + 管理员手动加余额（自动升级规则的判定口径）
+    total_incoming      REAL DEFAULT 0,
     created_at          INTEGER,
     updated_at          INTEGER
 );
