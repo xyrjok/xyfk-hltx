@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS products (
     image_url   TEXT,
     tags        TEXT,
     seo_description TEXT,
-    member_price_enabled INTEGER DEFAULT 1
+    member_price_enabled INTEGER DEFAULT 1,
+    -- [v2] 是否允许被外部平台通过 /api/open/v1 调用购买（白名单制，默认关闭）
+    api_enabled INTEGER DEFAULT 0
 );
 
 INSERT OR IGNORE INTO products (id, category_id, name, description, sort, active, created_at, image_url, tags, seo_description) VALUES (1, 1, '(AAA老号)GoogleVoice /GV靓号', '<p style="line-height: 1;">发货格式有两种：</p>
@@ -105,6 +107,8 @@ CREATE TABLE IF NOT EXISTS cards (
     content    TEXT NOT NULL,
     status     INTEGER DEFAULT 0,
     order_id   TEXT,
+    -- [v2] 出货渠道溯源：哪个 API 凭证出的货
+    api_ref_id INTEGER,
     created_at INTEGER,
     FOREIGN KEY (variant_id) REFERENCES variants(id) ON DELETE CASCADE
 );
@@ -158,7 +162,9 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at     INTEGER,
     paid_at        INTEGER,
     query_password TEXT,
-    user_id         INTEGER
+    user_id         INTEGER,
+    -- [v2] shop=零售 / recharge=会员充值 / api=API采购
+    order_type      TEXT DEFAULT 'shop'
 );
 
 -- 10. 自定义页面表 (并插入3个不可删除的默认页)
@@ -246,7 +252,54 @@ CREATE TABLE IF NOT EXISTS balance_transactions (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- 15. 频率限制表 (独立于 site_config，便于管理和自动清理)
+-- 16. [v2] API 凭证表（一个会员一把 key）
+CREATE TABLE IF NOT EXISTS api_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    api_key TEXT NOT NULL UNIQUE,
+    api_secret TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'approved',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    reject_reason TEXT,
+    rate_limit_per_min INTEGER DEFAULT 60,
+    price_mode TEXT DEFAULT 'member',
+    allow_callback INTEGER DEFAULT 1,
+    callback_whitelist TEXT,
+    last_used_at INTEGER,
+    created_at INTEGER,
+    updated_at INTEGER
+);
+
+-- 17. [v2] 下游订单幂等 + 回调状态
+CREATE TABLE IF NOT EXISTS api_order_refs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER NOT NULL,
+    order_id TEXT NOT NULL,
+    downstream_order_no TEXT,
+    trace_id TEXT,
+    callback_url TEXT,
+    callback_status TEXT DEFAULT 'pending',
+    callback_attempts INTEGER DEFAULT 0,
+    created_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_aor_cred_downstream ON api_order_refs(credential_id, downstream_order_no);
+CREATE INDEX IF NOT EXISTS idx_aor_order_id ON api_order_refs(order_id);
+
+-- 18. [v2] API 调用审计
+CREATE TABLE IF NOT EXISTS api_call_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER,
+    user_id INTEGER,
+    method TEXT,
+    path TEXT,
+    status_code INTEGER,
+    error_code TEXT,
+    ip TEXT,
+    created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_acl_user ON api_call_logs(user_id, created_at);
+
+-- 19. 频率限制表 (独立于 site_config，便于管理和自动清理)
 CREATE TABLE IF NOT EXISTS rate_limits (
     key           TEXT PRIMARY KEY,
     count         INTEGER DEFAULT 1,

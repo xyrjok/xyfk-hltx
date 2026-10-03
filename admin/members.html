@@ -355,6 +355,105 @@
     </div>
 </div>
 
+<!-- [v2] API Key 管理 Modal -->
+<div class="modal fade" id="apiKeyModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-key text-dark"></i> API Key 管理</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-3">会员: <strong id="apikey-username"></strong></p>
+
+                <div id="apikey-empty" style="display:none;">
+                    <div class="alert alert-secondary">该会员尚未开通 API。点击下方按钮生成 Key。</div>
+                </div>
+
+                <div id="apikey-box">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label small">API Key（身份标识，可展示）</label>
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control" id="apikey-key" readonly style="font-family:monospace;">
+                                <button class="btn btn-outline-secondary" type="button" onclick="copyText('apikey-key')"><i class="fas fa-copy"></i></button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">API Secret <span class="text-danger">（仅生成时显示一次）</span></label>
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control" id="apikey-secret" readonly placeholder="已设置，不可查看" style="font-family:monospace;">
+                                <button class="btn btn-outline-secondary" type="button" onclick="copyText('apikey-secret')"><i class="fas fa-copy"></i></button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="alert alert-danger py-2 small" id="apikey-secret-warning" style="display:none;">
+                        <i class="fas fa-exclamation-triangle"></i> <b>请立即复制保存！</b>关闭本窗口后 Secret 将无法再次查看，丢失只能重新生成（旧 Secret 立即失效）。
+                    </div>
+
+                    <div class="row mb-3">
+                        <div class="col-md-3">
+                            <label class="form-label small">状态</label>
+                            <select class="form-select form-select-sm" id="apikey-status">
+                                <option value="approved">已批准</option>
+                                <option value="pending_review">待审核</option>
+                                <option value="rejected">已拒绝</option>
+                                <option value="disabled">已禁用</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">限流（次/分钟）</label>
+                            <input type="number" class="form-control form-control-sm" id="apikey-rate" min="0" max="10000" placeholder="0 = 不限">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small">计价口径</label>
+                            <select class="form-select form-select-sm" id="apikey-pricemode">
+                                <option value="member">会员折扣价（推荐）</option>
+                                <option value="list">挂牌价（不打折）</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3 d-flex align-items-end">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="apikey-active">
+                                <label class="form-check-label small" for="apikey-active">启用</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="row mb-3">
+                        <div class="col-md-4">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="apikey-allowcb">
+                                <label class="form-check-label small" for="apikey-allowcb">允许出站回调（notify_url）</label>
+                            </div>
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label small">回调地址白名单 <span class="text-muted">（每行一条，留空 = 不限）</span></label>
+                            <textarea class="form-control form-control-sm" id="apikey-whitelist" rows="2" placeholder="https://example.com/notify"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="mb-2"><strong class="small">最近调用</strong></div>
+                    <div class="table-responsive" style="max-height:200px;overflow:auto;">
+                        <table class="table table-sm table-striped mb-0" style="font-size:12px;">
+                            <thead class="table-light"><tr><th>时间</th><th>方法</th><th>路径</th><th>状态</th><th>错误码</th><th>IP</th></tr></thead>
+                            <tbody id="apikey-logs"><tr><td colspan="6" class="text-center text-muted">暂无调用</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="apikey-msg" class="small text-danger mt-2" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-danger btn-sm me-auto" id="apikey-revoke-btn" onclick="revokeApiKey()"><i class="fas fa-trash"></i> 吊销 Key</button>
+                <button type="button" class="btn btn-outline-dark btn-sm" id="apikey-gen-btn" onclick="generateApiKey()"><i class="fas fa-sync"></i> <span id="apikey-gen-text">生成 / 重置</span></button>
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary btn-sm" onclick="saveApiKey()"><i class="fas fa-check"></i> 保存配置</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="../assets/jquery-3.6.0.min.js"></script>
 <script src="../assets/bootstrap.bundle.min.js"></script>
 <script src="../config.js"></script>
@@ -450,6 +549,7 @@
                     <button class="btn btn-sm btn-outline-warning me-1 js-balance-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" data-balance="${m.balance}" title="调整余额"><i class="fas fa-coins"></i></button>
                     <button class="btn btn-sm btn-outline-info me-1 js-level-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" data-level="${m.member_level || 0}" data-auto="${m.auto_level || 0}" data-src="${attrEsc(m.level_source || 'auto')}" title="设置等级"><i class="fas fa-crown"></i></button>
                     <button class="btn btn-sm btn-outline-secondary me-1 js-limit-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" data-per="${m.recharge_limit_per_tx || 0}" data-total="${m.recharge_limit_total || 0}" data-used="${m.total_recharge || 0}" title="充值限额"><i class="fas fa-sliders-h"></i></button>
+                    <button class="btn btn-sm btn-outline-dark me-1 js-apikey-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" title="API Key"><i class="fas fa-key"></i></button>
                     ${freezeBtn}
                     <button class="btn btn-sm btn-outline-danger js-del-btn" data-id="${m.id}" data-name="${attrEsc(m.email || m.username)}" title="删除"><i class="fas fa-trash"></i></button>
                 </td>
@@ -474,6 +574,7 @@
             if (btn.classList.contains('js-balance-btn')) openBalance(id, name, parseFloat(btn.dataset.balance) || 0);
             else if (btn.classList.contains('js-level-btn')) openSetLevel(id, name, parseInt(btn.dataset.level, 10) || 0, parseInt(btn.dataset.auto, 10) || 0, btn.dataset.src || 'auto');
             else if (btn.classList.contains('js-limit-btn')) openRechargeLimit(id, name, parseFloat(btn.dataset.per) || 0, parseFloat(btn.dataset.total) || 0, parseFloat(btn.dataset.used) || 0);
+            else if (btn.classList.contains('js-apikey-btn')) openApiKey(id, name);
             else if (btn.classList.contains('js-del-btn')) deleteMember(id, name);
         });
     })();
@@ -716,6 +817,122 @@
         });
         if (res.error) { msg.textContent = res.error; msg.style.display = ''; return; }
         bootstrap.Modal.getInstance(document.getElementById('rechargeLimitModal')).hide();
+        loadMembers();
+    }
+
+    // ==================== [v2] API Key 管理 ====================
+    let apiKeyEditId = null;
+
+    function copyText(inputId) {
+        const el = document.getElementById(inputId);
+        if (!el || !el.value) return;
+        el.select();
+        try { document.execCommand('copy'); } catch(e) {}
+        if (navigator.clipboard) navigator.clipboard.writeText(el.value).catch(() => {});
+    }
+
+    function apiMsg(t) {
+        const el = document.getElementById('apikey-msg');
+        el.textContent = t || ''; el.style.display = t ? '' : 'none';
+    }
+
+    function renderApiLogs(logs) {
+        const tb = document.getElementById('apikey-logs');
+        if (!logs || !logs.length) {
+            tb.innerHTML = '<tr><td colspan="6" class="text-center text-muted">暂无调用</td></tr>';
+            return;
+        }
+        tb.innerHTML = logs.map(l => {
+            const t = l.created_at ? new Date(l.created_at * 1000).toLocaleString('zh-CN') : '-';
+            const ok = (l.status_code || 0) < 400;
+            return `<tr>
+                <td class="text-nowrap">${t}</td>
+                <td>${escHtml(l.method || '')}</td>
+                <td>${escHtml(l.path || '')}</td>
+                <td><span class="badge ${ok ? 'bg-success' : 'bg-danger'}">${l.status_code || '-'}</span></td>
+                <td class="text-muted">${escHtml(l.error_code || '')}</td>
+                <td class="text-muted">${escHtml(l.ip || '')}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    async function openApiKey(id, name) {
+        apiKeyEditId = id;
+        document.getElementById('apikey-username').textContent = name;
+        document.getElementById('apikey-key').value = '';
+        document.getElementById('apikey-secret').value = '';
+        document.getElementById('apikey-secret').placeholder = '已设置，不可查看';
+        document.getElementById('apikey-secret-warning').style.display = 'none';
+        apiMsg('');
+        await loadApiKey();
+        new bootstrap.Modal(document.getElementById('apiKeyModal')).show();
+    }
+
+    async function loadApiKey() {
+        const d = await api('member/apikey/get?user_id=' + apiKeyEditId);
+        const has = d && d.exists;
+        document.getElementById('apikey-empty').style.display = has ? 'none' : '';
+        document.getElementById('apikey-box').style.display = has ? '' : 'none';
+        document.getElementById('apikey-revoke-btn').style.display = has ? '' : 'none';
+        document.getElementById('apikey-gen-text').textContent = has ? '重置 Secret' : '生成 Key';
+        if (has) {
+            document.getElementById('apikey-key').value = d.api_key || '';
+            document.getElementById('apikey-status').value = d.status || 'approved';
+            document.getElementById('apikey-rate').value = d.rate_limit_per_min || 0;
+            document.getElementById('apikey-pricemode').value = d.price_mode || 'member';
+            document.getElementById('apikey-active').checked = !!d.is_active;
+            document.getElementById('apikey-allowcb').checked = !!d.allow_callback;
+            document.getElementById('apikey-whitelist').value = (d.callback_whitelist || []).join('\n');
+            const logs = await api('member/apilog/list?user_id=' + apiKeyEditId + '&limit=30');
+            renderApiLogs(logs.logs);
+        }
+    }
+
+    async function generateApiKey() {
+        const existing = document.getElementById('apikey-key').value;
+        const isReset = !!existing;
+        if (isReset && !confirm('确认重置 Secret？\n\n旧 Secret 立即失效，所有正在用它的对接方都会断开，需要用新 Secret 重新配置。')) return;
+        const res = await api('member/apikey/generate', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: apiKeyEditId, regenerate: isReset })
+        });
+        if (res.error) { apiMsg(res.error); return; }
+        document.getElementById('apikey-key').value = res.api_key || '';
+        const secEl = document.getElementById('apikey-secret');
+        secEl.value = res.api_secret || '';
+        secEl.placeholder = '';
+        document.getElementById('apikey-secret-warning').style.display = '';
+        document.getElementById('apikey-empty').style.display = 'none';
+        document.getElementById('apikey-box').style.display = '';
+        document.getElementById('apikey-revoke-btn').style.display = '';
+        document.getElementById('apikey-gen-text').textContent = '重置 Secret';
+    }
+
+    async function saveApiKey() {
+        const res = await api('member/apikey/update', {
+            method: 'POST',
+            body: JSON.stringify({
+                user_id: apiKeyEditId,
+                is_active: document.getElementById('apikey-active').checked,
+                status: document.getElementById('apikey-status').value,
+                rate_limit_per_min: parseInt(document.getElementById('apikey-rate').value) || 0,
+                price_mode: document.getElementById('apikey-pricemode').value,
+                allow_callback: document.getElementById('apikey-allowcb').checked,
+                callback_whitelist: document.getElementById('apikey-whitelist').value
+                    .split('\n').map(s => s.trim()).filter(Boolean)
+            })
+        });
+        if (res.error) { apiMsg(res.error); return; }
+        apiMsg('');
+        bootstrap.Modal.getInstance(document.getElementById('apiKeyModal')).hide();
+        loadMembers();
+    }
+
+    async function revokeApiKey() {
+        if (!confirm('确认吊销该会员的 API Key？\n\nKey 与 Secret 会被删除，所有对接立即断开，需重新生成才能恢复。')) return;
+        const res = await api('member/apikey/revoke', { method: 'POST', body: JSON.stringify({ user_id: apiKeyEditId }) });
+        if (res.error) { apiMsg(res.error); return; }
+        bootstrap.Modal.getInstance(document.getElementById('apiKeyModal')).hide();
         loadMembers();
     }
 
