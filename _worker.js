@@ -2985,11 +2985,15 @@ async function handleApi(request, env, url, ctx) {
             // === [v1] 自助充值限额校验 ===
             // ⚠️ 铁律：只在【建单前】校验，绝不在支付回调里拦——否则用户已付款却不入账，是资损事故。
             const maxRow = await db.prepare("SELECT value FROM site_config WHERE key='recharge_max_per_tx'").first();
-            const globalMax = parseFloat(maxRow && maxRow.value) || 10000;
+            // 0 = 不限（与会员个人限额口径一致）；未配置时用 10000 兜底
+            const gv = (maxRow && maxRow.value !== undefined && maxRow.value !== null && maxRow.value !== '')
+                ? (parseFloat(maxRow.value) || 0) : 10000;
             const perTx = parseFloat(user.recharge_limit_per_tx) || 0;
-            const cap = perTx > 0 ? Math.min(perTx, globalMax) : globalMax;
-            if (amt > cap) {
-                return errRes((perTx > 0 && perTx < globalMax)
+            // 全局上限 与 会员个人单笔限额 取小者（0 = 不限，不参与取小）
+            const cands = [gv, perTx].filter(v => v > 0);
+            const cap = cands.length ? Math.min.apply(null, cands) : 0;
+            if (cap > 0 && amt > cap) {
+                return errRes((perTx > 0 && perTx === cap)
                     ? '单笔自助充值不能超过 ' + cap + ' 元，大额充值请联系管理员线下入账'
                     : '单次充值不能超过 ' + cap + ' 元', 403);
             }
