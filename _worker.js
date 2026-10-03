@@ -1178,6 +1178,182 @@ async function validateMemberLevel(db, level) {
     }
 }
 
+// ===================== [v3] MD5 (RFC 1321) =====================
+// Web Crypto 不提供 MD5，但 dujiao-next 的 body hash 与 acg-faka 的签名都要求 MD5。
+// 已用 RFC 1321 全部 7 个标准测试向量验证，并经 Python hashlib 交叉确认。
+const _md5K = (() => { const K = new Uint32Array(64); for (let i = 0; i < 64; i++) K[i] = (Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0; return K; })();
+const _md5S = [7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
+               5, 9,14,20, 5, 9,14,20, 5, 9,14,20, 5, 9,14,20,
+               4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
+               6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21];
+function md5Bytes(buf) {
+    const ml = buf.length;
+    const total = ((((ml + 8) >> 6) + 1) << 6);
+    const padded = new Uint8Array(total);
+    padded.set(buf);
+    padded[ml] = 0x80;
+    const bitLen = ml * 8;
+    const dv = new DataView(padded.buffer);
+    dv.setUint32(total - 8, bitLen >>> 0, true);
+    dv.setUint32(total - 4, Math.floor(bitLen / 4294967296) >>> 0, true);
+    let a = 0x67452301, b = 0xefcdab89, c = 0x98badcfe, d = 0x10325476;
+    const M = new Uint32Array(16);
+    for (let off = 0; off < total; off += 64) {
+        for (let i = 0; i < 16; i++) M[i] = dv.getUint32(off + i * 4, true);
+        let A = a, B = b, C = c, D = d;
+        for (let i = 0; i < 64; i++) {
+            let F, g;
+            if (i < 16)      { F = (B & C) | (~B & D);   g = i; }
+            else if (i < 32) { F = (D & B) | (~D & C);   g = (5 * i + 1) % 16; }
+            else if (i < 48) { F = B ^ C ^ D;            g = (3 * i + 5) % 16; }
+            else             { F = C ^ (B | ~D);         g = (7 * i) % 16; }
+            F = (F + A + _md5K[i] + M[g]) >>> 0;
+            A = D; D = C; C = B;
+            B = (B + ((F << _md5S[i]) | (F >>> (32 - _md5S[i])))) >>> 0;
+        }
+        a = (a + A) >>> 0; b = (b + B) >>> 0; c = (c + C) >>> 0; d = (d + D) >>> 0;
+    }
+    const out = new Uint8Array(16);
+    const odv = new DataView(out.buffer);
+    odv.setUint32(0, a, true); odv.setUint32(4, b, true);
+    odv.setUint32(8, c, true); odv.setUint32(12, d, true);
+    return out;
+}
+const md5Hex = (input) => {
+    const bytes = (typeof input === 'string') ? new TextEncoder().encode(input) : input;
+    return Array.from(md5Bytes(bytes)).map(x => x.toString(16).padStart(2, '0')).join('');
+};
+// ===================== END MD5 =====================
+
+// [v3] 上游连接表（采购方侧配置）
+let _upstreamConnEnsured = false;
+async function ensureUpstreamConnTable(db) {
+    if (_upstreamConnEnsured) return;
+    try {
+        await db.prepare(`CREATE TABLE IF NOT EXISTS upstream_connections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            base_url TEXT NOT NULL,
+            protocol TEXT DEFAULT 'open-v1',
+            api_key TEXT,
+            api_secret TEXT,
+            enabled INTEGER DEFAULT 1,
+            last_sync_at INTEGER,
+            created_at INTEGER,
+            updated_at INTEGER
+        )`).run();
+    } catch(e) {}
+    _upstreamConnEnsured = true;
+}
+
+// [v3] 递归深度守卫：防止 A→B→A→B 无限循环把额度/库存/余额全部烧光。
+// 所有会触发「向下游发货 / 向下游回调」的出站调用都应带 X-XYFK-Chain-Depth 并递增。
+const CHAIN_DEPTH_LIMIT = 3;
+function chainDepth(request) {
+    const v = parseInt(request.headers.get('X-XYFK-Chain-Depth') || '0');
+    return isNaN(v) ? 0 : v;
+}
+
+// ===================== [v3] dujiao-next 上游供货协议 =====================
+// 协议来源：dujiao-next 内部/upstream/signer.go 与 internal/modules/upstreamapi/transport/http/
+// 严格 1:1 复刻，任何 dujiao-next 实例都能把本站当上游供货商。
+// 签名：HMAC-SHA256(secret, "{method}\n{path}\n{timestamp}\n{md5hex(body)}")
+//       path 【不含】query string；空 body 的 md5 = d41d8cd98f00b204e9800998ecf8427e
+const hmacMd5Sign = async (secret, method, path, ts, bodyStr) => {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const msg = `${method}\n${path}\n${ts}\n${md5Hex(bodyStr)}`;
+    const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg));
+    return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+};
+
+// dujiao-next 风格错误响应
+const upErr = (status, code, message) => jsonRes({ ok: false, error_code: code, error_message: message }, status);
+
+// dujiao-next 鉴权（header 名与容差均与上游协议一致）
+async function upstreamAuth(request, env, db) {
+    await ensureApiTables(db);
+    const h = request.headers;
+    const apiKey = h.get('Dujiao-Next-Api-Key') || '';
+    const tsStr = h.get('Dujiao-Next-Timestamp') || '';
+    const sig = h.get('Dujiao-Next-Signature') || '';
+    if (!apiKey || !tsStr || !sig) return { ok: false, status: 401, code: 'missing_auth_headers', msg: 'missing authentication headers' };
+    const ts = parseInt(tsStr, 10);
+    if (isNaN(ts)) return { ok: false, status: 401, code: 'invalid_timestamp', msg: 'invalid timestamp' };
+    if (Math.abs(time() - ts) > 60) return { ok: false, status: 401, code: 'timestamp_expired', msg: 'timestamp expired' };
+
+    const cred = await db.prepare('SELECT * FROM api_credentials WHERE api_key=?').bind(apiKey).first();
+    if (!cred || cred.status !== 'approved' || cred.is_active !== 1) {
+        return { ok: false, status: 403, code: 'invalid_api_key', msg: 'api key is invalid or disabled' };
+    }
+    const user = await db.prepare('SELECT id, username, email, balance, frozen, member_level, total_incoming FROM users WHERE id=?').bind(cred.user_id).first();
+    if (!user) return { ok: false, status: 403, code: 'invalid_api_key', msg: 'api key is invalid or disabled' };
+    if (user.frozen === 1) return { ok: false, status: 403, code: 'user_disabled', msg: 'user account is disabled' };
+
+    const signPath = new URL(request.url).pathname;   // 不含 query
+    let bodyStr = '';
+    try { bodyStr = await request.clone().text(); } catch(e) { bodyStr = ''; }
+    const expect = await hmacMd5Sign(cred.api_secret, request.method, signPath, ts, bodyStr);
+    if (!timingSafeEqual(expect, (sig || '').toLowerCase())) {
+        return { ok: false, status: 401, code: 'invalid_signature', msg: 'signature verification failed' };
+    }
+    const rl = await checkRateLimit(db, 'up_' + apiKey, parseInt(cred.rate_limit_per_min) || 60, 60);
+    if (!rl.ok) return { ok: false, status: 429, code: 'rate_limited', msg: 'too many requests' };
+    return { ok: true, user, cred };
+}
+
+// 协议里的多语言 JSON 字段（jsonmap.JSON），中文站统一回 zh_CN
+const jsonmap = (s) => ({ zh_CN: String(s == null ? '' : s) });
+
+// ===================== [v3] acg-faka「对接店铺/上游货源」协议 =====================
+// 协议来源：acg-faka app/Util/Str.php generateSignature + app/Interceptor/SharedValidation.php
+// 签名（易支付风格 MD5）：
+//   unset(sign) → ksort → 移除空串 → http_build_query(data) + "&key=" + appKey → urldecode → md5
+// ⚠️ urlencode+urldecode 是恒等变换，故可直接用原始 key=value 以 & 连接。
+// 封套：{ code: 200, msg: 'success', data: {...} }
+const acgSign = (data, appKey) => {
+    const d = Object.assign({}, data);
+    delete d.sign;
+    const keys = Object.keys(d).filter(k => d[k] !== '' && d[k] !== null && d[k] !== undefined).sort();
+    const s = keys.map(k => k + '=' + String(d[k])).join('&') + '&key=' + String(appKey);
+    return md5Hex(s);
+};
+const acgOk = (data, msg) => jsonRes({ code: 200, msg: msg || 'success', data: data || {} });
+const acgErr = (msg, code) => jsonRes({ code: code || 400, msg: String(msg || 'error'), data: null });
+
+// 解析 x-www-form-urlencoded（保留原始字符串值，与 PHP $_POST 一致）
+async function parseFormBody(request) {
+    let text = '';
+    try { text = await request.clone().text(); } catch(e) { return {}; }
+    const out = {};
+    if (!text) return out;
+    try {
+        const sp = new URLSearchParams(text);
+        for (const [k, v] of sp.entries()) out[k] = v;
+    } catch(e) {}
+    return out;
+}
+
+// acg-faka 鉴权：app_id = 本站会员ID；app_key = 该会员的 api_secret（兼作签名密钥）
+async function acgAuth(request, db, form) {
+    await ensureApiTables(db);
+    const appId = parseInt(form.app_id);
+    if (!appId) return { ok: false, msg: '商户ID不存在' };
+    const cred = await db.prepare('SELECT * FROM api_credentials WHERE user_id=?').bind(appId).first();
+    if (!cred) return { ok: false, msg: '商户ID不存在' };
+    if (cred.status !== 'approved' || cred.is_active !== 1) return { ok: false, msg: '密钥错误' };
+    const providedKey = String(form.app_key || '');
+    if (!providedKey || !timingSafeEqual(providedKey, String(cred.api_secret))) return { ok: false, msg: '密钥错误' };
+    const sign = String(form.sign || '');
+    if (!sign || !timingSafeEqual(acgSign(form, providedKey), sign)) return { ok: false, msg: '密钥错误' };
+    const user = await db.prepare('SELECT id, username, email, balance, frozen, member_level, total_incoming FROM users WHERE id=?').bind(appId).first();
+    if (!user) return { ok: false, msg: '商户ID不存在' };
+    if (user.frozen === 1) return { ok: false, msg: '账户已被冻结' };
+    const rl = await checkRateLimit(db, 'acg_' + cred.api_key, parseInt(cred.rate_limit_per_min) || 60, 60);
+    if (!rl.ok) return { ok: false, msg: '请求过于频繁' };
+    return { ok: true, user, cred };
+}
+
 // ===================== [v2] 开放 API 基础设施 =====================
 
 // 建表：API 凭证 / 幂等引用 / 调用审计；并给 products、orders 补列
@@ -1231,6 +1407,8 @@ async function ensureApiTables(db) {
         'CREATE INDEX IF NOT EXISTS idx_acl_user ON api_call_logs(user_id, created_at)',
         // 商品：是否允许被 API 调用购买
         'ALTER TABLE products ADD COLUMN api_enabled INTEGER DEFAULT 0',
+        // 商品：最后变更时间（增量同步 / updated_after 用）
+        'ALTER TABLE products ADD COLUMN updated_at INTEGER',
         // 订单类型：shop=零售 / recharge=充值 / api=API采购（避免靠商品名字符串区分）
         "ALTER TABLE orders ADD COLUMN order_type TEXT DEFAULT 'shop'",
         // 卡密渠道溯源
@@ -1389,6 +1567,519 @@ async function handleApi(request, env, url, ctx) {
             await ensureProductColumns(db);
         }
         // ===========================
+        // --- [v3] acg-faka 对接店铺协议 /shared/* ---
+        // ===========================
+        if (path.startsWith('/shared/')) {
+            const form = await parseFormBody(request);
+            const aa = await acgAuth(request, db, form);
+            if (!aa.ok) { await logApiCall(db, null, request, 200, 'acg_auth_failed'); return acgErr(aa.msg); }
+            const aUid = aa.user.id;
+            const acgStockOf = async (variant) => {
+                if (variant.auto_delivery === 1) {
+                    const r = await db.prepare('SELECT COUNT(*) as c FROM cards WHERE variant_id=? AND status=0').bind(variant.id).first();
+                    return r ? (r.c || 0) : 0;
+                }
+                return parseInt(variant.stock) || 0;
+            };
+            // acg-faka 用 code 标识商品；这里用商品 id 的字符串形式
+            const findGoods = async (code) => {
+                const pid = parseInt(code);
+                if (!pid) return null;
+                return await db.prepare('SELECT * FROM products WHERE id=? AND api_enabled=1 AND active=1').bind(pid).first() || null;
+            };
+
+            // ---- 1. 连接测试 ----
+            if (path === '/shared/authentication/connect') {
+                const s = await db.prepare("SELECT value FROM site_config WHERE key='site_name'").first();
+                await logApiCall(db, aa, request, 200);
+                return acgOk({ shopName: (s && s.value) || 'xyfk', balance: (parseFloat(aa.user.balance) || 0).toFixed(2) });
+            }
+
+            // ---- 2. 商品列表 ----
+            if (path === '/shared/commodity/items') {
+                const rows = (await db.prepare('SELECT * FROM products WHERE api_enabled=1 AND active=1 ORDER BY sort DESC, id ASC').all()).results || [];
+                const data = [];
+                for (const p of rows) {
+                    const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC').bind(p.id).all()).results || [];
+                    const skus = [];
+                    for (const v of vars) {
+                        skus.push({
+                            id: v.id, sku: v.name, name: v.name,
+                            price: (parseFloat(v.price) || 0).toFixed(2),
+                            stock: await acgStockOf(v)
+                        });
+                    }
+                    data.push({
+                        code: String(p.id), name: p.name,
+                        introduce: (p.description || '').replace(/<[^>]+>/g, '').substring(0, 300),
+                        picture: p.image_url || '', category: String(p.category_id || 1),
+                        price: skus.length ? skus[0].price : '0.00', skus
+                    });
+                }
+                await logApiCall(db, aa, request, 200);
+                return acgOk(data);
+            }
+
+            // ---- 3. 商品详情 ----
+            if (path === '/shared/commodity/item') {
+                const p = await findGoods(form.code);
+                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('该商品暂未上架'); }
+                const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC').bind(p.id).all()).results || [];
+                const skus = [];
+                for (const v of vars) skus.push({ id: v.id, sku: v.name, name: v.name, price: (parseFloat(v.price) || 0).toFixed(2), stock: await acgStockOf(v) });
+                await logApiCall(db, aa, request, 200);
+                return acgOk({
+                    code: String(p.id), name: p.name,
+                    introduce: (p.description || '').replace(/<[^>]+>/g, ''),
+                    picture: p.image_url || '', category: String(p.category_id || 1),
+                    price: skus.length ? skus[0].price : '0.00',
+                    factory_price: skus.length ? skus[0].price : '0.00',
+                    delivery_way: (vars[0] && vars[0].auto_delivery === 1) ? 1 : 2,
+                    draft_status: 1, is_category: 0, skus
+                });
+            }
+
+            // ---- 4/5. 库存 ----
+            if (path === '/shared/commodity/inventory' || path === '/shared/commodity/stock') {
+                const p = await findGoods(form.sharedCode || form.code);
+                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('该商品暂未上架'); }
+                const vars = (await db.prepare(`SELECT * FROM variants WHERE product_id=? AND active=1 ${form.sku ? 'AND id=?' : ''}`).bind(...(form.sku ? [p.id, form.sku] : [p.id])).all()).results || [];
+                let total = 0;
+                for (const v of vars) total += await acgStockOf(v);
+                await logApiCall(db, aa, request, 200);
+                return acgOk({ code: String(p.id), stock: total });
+            }
+
+            // ---- 11. 库存状态（预选）----
+            if (path === '/shared/commodity/inventoryState') {
+                const p = await findGoods(form.shared_code);
+                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('该商品暂未上架'); }
+                const num = parseInt(form.num) || 1;
+                const cardId = parseInt(form.card_id) || 0;
+                if (cardId) {
+                    const c = await db.prepare('SELECT id FROM cards WHERE id=? AND status=0').bind(cardId).first();
+                    await logApiCall(db, aa, request, 200);
+                    return acgOk({ status: c ? 1 : 0 });
+                }
+                const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1').bind(p.id).all()).results || [];
+                let total = 0;
+                for (const v of vars) total += await acgStockOf(v);
+                await logApiCall(db, aa, request, 200);
+                return acgOk({ status: total >= num ? 1 : 0, stock: total });
+            }
+
+            // ---- 6. 定价 ----
+            if (path === '/shared/commodity/valuation') {
+                const p = await findGoods(form.code);
+                if (!p) return acgErr('该商品暂未上架');
+                const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1').bind(p.id).all()).results || [];
+                const out = [];
+                for (const v of vars) {
+                    out.push({ id: v.id, sku: v.name, price: (await apiUnitPrice(db, aa, v, p, parseInt(form.num) || 1)).toFixed(2) });
+                }
+                await logApiCall(db, aa, request, 200);
+                return acgOk(out);
+            }
+
+            // ---- 7. 下单 ----
+            if (path === '/shared/commodity/trade') {
+                const p = await findGoods(form.shared_code);
+                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('该商品暂未上架'); }
+                const vid = parseInt(form.sku) || 0;
+                const v = vid
+                    ? await db.prepare('SELECT * FROM variants WHERE id=? AND product_id=? AND active=1').bind(vid, p.id).first()
+                    : await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC LIMIT 1').bind(p.id).first();
+                if (!v) return acgErr('该商品暂未上架');
+                const num = Math.max(1, parseInt(form.num) || 1);
+                const stock = await acgStockOf(v);
+                if (stock < num) return acgErr('库存不足');
+                const unit = await apiUnitPrice(db, aa, v, p, num);
+                const total = Math.round(unit * num * 100) / 100;
+                if ((parseFloat(aa.user.balance) || 0) < total) return acgErr('余额不足');
+                const orderId = uuid();
+                const now = time();
+                let cards = [];
+                if (v.auto_delivery === 1) {
+                    const cands = (await db.prepare('SELECT id FROM cards WHERE variant_id=? AND status=0 ORDER BY id ASC LIMIT ?').bind(v.id, num).all()).results || [];
+                    if (cands.length < num) return acgErr('库存不足');
+                    const ids = cands.map(c => c.id);
+                    const ph = ids.map(() => '?').join(',');
+                    await db.prepare(`UPDATE cards SET status=1, order_id=? WHERE id IN (${ph}) AND status=0`).bind(orderId, ...ids).run();
+                    cards = (await db.prepare('SELECT id, content FROM cards WHERE order_id=? AND variant_id=? ORDER BY id ASC').bind(orderId, v.id).all()).results || [];
+                    if (cards.length < num) {
+                        await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(orderId).run();
+                        return acgErr('库存竞争失败，请重试');
+                    }
+                }
+                const dec = await db.prepare('UPDATE users SET balance = balance - ?, updated_at=? WHERE id=? AND balance >= ?').bind(total, now, aUid, total).run();
+                if (!dec.success || dec.meta.changes !== 1) {
+                    if (cards.length) await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(orderId).run();
+                    return acgErr('余额不足');
+                }
+                await db.prepare('INSERT INTO orders (id, trade_no, variant_id, product_name, variant_name, price, quantity, total_amount, contact, query_password, payment_method, created_at, status, cards_sent, user_id, order_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                    .bind(orderId, form.trade_no || null, v.id, p.name, v.name, unit, num, total.toFixed(2),
+                        aa.user.email || aa.user.username, 'api_' + aa.cred.id, 'balance', now, 1,
+                        cards.length ? JSON.stringify(cards.map(c => ({ id: c.id, content: c.content }))) : null, aUid, 'api').run();
+                await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+                    .bind(aUid, -total, 'api_purchase', 'acg 采购 ' + p.name + ' x' + num, orderId, now).run();
+                const refIns = await db.prepare('INSERT INTO api_order_refs (credential_id, order_id, downstream_order_no, callback_status, created_at) VALUES (?, ?, ?, ?, ?)')
+                    .bind(aa.cred.id, orderId, (form.trade_no || '').toString().substring(0, 64) || null, 'none', now).run();
+                await logApiCall(db, aa, request, 200);
+                return acgOk({ trade_no: orderId, id: refIns.meta.last_row_id, amount: total.toFixed(2) });
+            }
+
+            // ---- 8/12. 拉卡密 / 草稿 ----
+            if (path === '/shared/commodity/draftCard' || path === '/shared/commodity/draft') {
+                const p = await findGoods(form.code);
+                if (!p) return acgErr('该商品暂未上架');
+                const limit = Math.min(100, Math.max(1, parseInt(form.limit) || 10));
+                const rows = (await db.prepare('SELECT id, content FROM cards WHERE variant_id IN (SELECT id FROM variants WHERE product_id=?) AND status=0 ORDER BY id ASC LIMIT ?').bind(p.id, limit).all()).results || [];
+                await logApiCall(db, aa, request, 200);
+                return acgOk({
+                    total: rows.length,
+                    list: rows.map(c => ({
+                        id: c.id,
+                        draft: (c.content.match(/#\[(.*?)\]/) || [, ''])[1],
+                        draft_premium: 0
+                    }))
+                });
+            }
+
+            // ---- 9. 查单 ----
+            const qMatch = path.match(/^\/shared\/commodity\/query\/(.+)$/);
+            if (qMatch) {
+                const tradeNo = decodeURIComponent(qMatch[1]);
+                const ref = await db.prepare('SELECT * FROM api_order_refs WHERE downstream_order_no=? AND credential_id=?').bind(tradeNo, aa.cred.id).first()
+                    || await db.prepare('SELECT * FROM api_order_refs WHERE order_id=? AND credential_id=?').bind(tradeNo, aa.cred.id).first();
+                if (!ref) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('订单不存在'); }
+                const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(ref.order_id).first();
+                if (!o) return acgErr('订单不存在');
+                let list = [];
+                try {
+                    const cr = (await db.prepare('SELECT id, content FROM cards WHERE order_id=? ORDER BY id ASC').bind(ref.order_id).all()).results || [];
+                    list = cr.map(c => ({ id: c.id, content: c.content }));
+                } catch(e) {}
+                await logApiCall(db, aa, request, 200);
+                return acgOk({ trade_no: o.id, status: o.status === 1 ? 1 : (o.status === 0 ? 0 : -1), amount: parseFloat(o.total_amount).toFixed(2), list });
+            }
+
+            await logApiCall(db, aa, request, 200, 'acg_not_found');
+            return acgErr('接口不存在');
+        }
+
+        // ===========================
+        // --- [v3] dujiao-next 上游供货协议 /api/v1/upstream/* ---
+        // ===========================
+        if (path.startsWith('/api/v1/upstream/')) {
+            const ua = await upstreamAuth(request, env, db);
+            if (!ua.ok) {
+                await logApiCall(db, null, request, ua.status, ua.code);
+                return upErr(ua.status, ua.code, ua.msg);
+            }
+            const uid = ua.user.id;
+            const uname = ua.user.username || ua.user.email || ('user_' + uid);
+
+            // 协议内统一的库存计算
+            const upStockOf = async (variant) => {
+                if (variant.auto_delivery === 1) {
+                    const r = await db.prepare('SELECT COUNT(*) as c FROM cards WHERE variant_id=? AND status=0').bind(variant.id).first();
+                    return r ? (r.c || 0) : 0;
+                }
+                return parseInt(variant.stock) || 0;
+            };
+            const upSku = async (v) => {
+                const stock = await upStockOf(v);
+                let wc = null;
+                if (v.wholesale_config) {
+                    try { wc = typeof v.wholesale_config === 'string' ? JSON.parse(v.wholesale_config) : v.wholesale_config; } catch(e) { wc = null; }
+                }
+                return {
+                    id: v.id,
+                    sku_code: 'v' + v.id,
+                    spec_values: jsonmap(v.name),
+                    price_amount: (parseFloat(v.price) || 0).toFixed(2),
+                    original_price: (parseFloat(v.price) || 0).toFixed(2),
+                    wholesale_prices: Array.isArray(wc) ? wc.map(r => ({ qty: parseInt(r.qty) || 0, price: (parseFloat(r.price) || 0).toFixed(2) })) : [],
+                    stock_status: stock > 0 ? 'in_stock' : 'out_of_stock',
+                    stock_quantity: stock,
+                    is_active: v.active === 1
+                };
+            };
+            const upProduct = async (p, vars) => {
+                const skus = [];
+                for (const v of vars) skus.push(await upSku(v));
+                const price = skus.length ? skus.map(s => parseFloat(s.price_amount)).sort((a, b) => a - b)[0].toFixed(2) : '0.00';
+                return {
+                    id: p.id,
+                    seo_meta: jsonmap(p.seo_description || ''),
+                    title: jsonmap(p.name),
+                    description: jsonmap((p.description || '').replace(/<[^>]+>/g, '').substring(0, 500)),
+                    content: jsonmap(''),
+                    images: p.image_url ? [p.image_url] : [],
+                    tags: (p.tags || '').split(/[,，\s]+/).filter(Boolean),
+                    price_amount: price,
+                    original_price: price,
+                    currency: 'CNY',
+                    fulfillment_type: (vars[0] && vars[0].auto_delivery === 1) ? 'auto' : 'manual',
+                    manual_form_schema: {},
+                    is_active: p.active === 1 && p.api_enabled === 1,
+                    category_id: p.category_id,
+                    skus,
+                    updated_at: new Date((p.updated_at || p.created_at || 0) * 1000).toISOString()
+                };
+            };
+
+            // ---- POST /api/v1/upstream/ping ----
+            if (path === '/api/v1/upstream/ping' && method === 'POST') {
+                const siteRow = await db.prepare("SELECT value FROM site_config WHERE key='site_name'").first();
+                let memberLevel = null;
+                const lvRow = await db.prepare("SELECT value FROM site_config WHERE key='member_levels'").first();
+                if (lvRow && lvRow.value) {
+                    try {
+                        const levels = JSON.parse(lvRow.value);
+                        const lv = levels && levels[ua.user.member_level || 0];
+                        if (lv) memberLevel = { id: (ua.user.member_level || 0), name: jsonmap(lv.name || ''), slug: 'level_' + (ua.user.member_level || 0), icon: '' };
+                    } catch(e) {}
+                }
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({
+                    ok: true,
+                    site_name: (siteRow && siteRow.value) || 'xyfk',
+                    protocol_version: '1.0',
+                    user_id: uid,
+                    balance: (parseFloat(ua.user.balance) || 0).toFixed(2),
+                    currency: 'CNY',
+                    member_level: memberLevel
+                });
+            }
+
+            // ---- GET /api/v1/upstream/categories ----
+            if (path === '/api/v1/upstream/categories' && method === 'GET') {
+                const rows = (await db.prepare('SELECT * FROM categories ORDER BY sort DESC, id ASC').all()).results || [];
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({ ok: true, categories: rows.map(c => ({
+                    id: c.id, parent_id: 0, slug: 'c' + c.id, name: jsonmap(c.name), icon: c.image_url || '', sort_order: c.sort || 0
+                })) });
+            }
+
+            // ---- GET /api/v1/upstream/products ----
+            const listMatch = path === '/api/v1/upstream/products' && method === 'GET';
+            if (listMatch) {
+                const page = Math.max(1, parseInt(url.searchParams.get('page')) || 1);
+                const pageSize = Math.min(100, Math.max(1, parseInt(url.searchParams.get('page_size')) || 20));
+                const includeInactive = url.searchParams.get('include_inactive') === 'true';
+                const updatedAfter = url.searchParams.get('updated_after');
+                let where = 'WHERE api_enabled=1';
+                const binds = [];
+                if (!includeInactive) where += ' AND active=1';
+                if (updatedAfter) {
+                    const ts = Math.floor(new Date(updatedAfter).getTime() / 1000);
+                    if (!isNaN(ts)) { where += ' AND (updated_at IS NULL OR updated_at >= ? OR (updated_at IS NULL AND created_at >= ?))'; binds.push(ts, ts); }
+                }
+                const total = (await db.prepare(`SELECT COUNT(*) as c FROM products ${where}`).bind(...binds).first() || {}).c || 0;
+                const rows = (await db.prepare(`SELECT * FROM products ${where} ORDER BY sort DESC, id ASC LIMIT ? OFFSET ?`)
+                    .bind(...binds, pageSize, (page - 1) * pageSize).all()).results || [];
+                const items = [];
+                if (rows.length) {
+                    const ids = rows.map(p => p.id);
+                    const ph = ids.map(() => '?').join(',');
+                    const allVars = (await db.prepare(`SELECT * FROM variants WHERE product_id IN (${ph}) AND active=1 ORDER BY sort DESC, id ASC`).bind(...ids).all()).results || [];
+                    for (const p of rows) items.push(await upProduct(p, allVars.filter(v => v.product_id === p.id)));
+                }
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({ total, items, includes_inactive: includeInactive });
+            }
+
+            // ---- GET /api/v1/upstream/products/{id} ----
+            const prodMatch = path.match(/^\/api\/v1\/upstream\/products\/(\d+)$/);
+            if (prodMatch && method === 'GET') {
+                const pid = parseInt(prodMatch[1]);
+                const p = await db.prepare('SELECT * FROM products WHERE id=? AND api_enabled=1').bind(pid).first();
+                if (!p) {
+                    await logApiCall(db, ua, request, 404, 'product_deleted');
+                    return upErr(404, 'product_deleted', 'product not found');
+                }
+                const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC').bind(pid).all()).results || [];
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({ ok: true, product: await upProduct(p, vars) });
+            }
+
+            // ---- POST /api/v1/upstream/orders ----
+            if (path === '/api/v1/upstream/orders' && method === 'POST') {
+                // [v3] 递归深度守卫：A→B→A→B 无限循环保护
+                if (chainDepth(request) >= CHAIN_DEPTH_LIMIT) {
+                    await logApiCall(db, ua, request, 400, 'chain_depth_exceeded');
+                    return upErr(400, 'bad_request', 'chain depth exceeded: possible upstream loop detected');
+                }
+                let body = {};
+                try { body = await request.json(); } catch(e) {
+                    await logApiCall(db, ua, request, 400, 'bad_request');
+                    return upErr(400, 'bad_request', 'invalid request body');
+                }
+                const skuId = parseInt(body.sku_id);
+                const qty = parseInt(body.quantity) || 0;
+                const dsNo = (body.downstream_order_no || '').toString().trim().substring(0, 64) || null;
+                const traceId = (body.trace_id || '').toString().substring(0, 64) || null;
+                const cbUrl = (body.callback_url || '').toString().trim().substring(0, 500) || null;
+                if (!skuId || qty < 1) {
+                    await logApiCall(db, ua, request, 400, 'bad_request');
+                    return upErr(400, 'bad_request', 'sku_id 与 quantity 必填');
+                }
+                // callback_url SSRF 防护（协议强制要求）
+                if (cbUrl) {
+                    if (!/^https?:\/\//i.test(cbUrl)) {
+                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                        return upErr(400, 'invalid_callback_url', 'callback_url must be http(s)');
+                    }
+                    try {
+                        const cu = new URL(cbUrl);
+                        const hn = cu.hostname.toLowerCase();
+                        if (hn === 'localhost' || hn.endsWith('.local') || hn.endsWith('.internal') ||
+                            /^127\./.test(hn) || /^10\./.test(hn) || /^192\.168\./.test(hn) ||
+                            /^172\.(1[6-9]|2\d|3[01])\./.test(hn) || /^169\.254\./.test(hn) || hn === '::1' || hn === '0.0.0.0') {
+                            await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                            return upErr(400, 'invalid_callback_url', 'callback_url must not point to a private/loopback address');
+                        }
+                    } catch(e) {
+                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                        return upErr(400, 'invalid_callback_url', 'callback_url is not a valid URL');
+                    }
+                    if (ua.cred.allow_callback !== 1) {
+                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                        return upErr(400, 'invalid_callback_url', 'callback is disabled for this api key');
+                    }
+                    let wl = [];
+                    try { wl = ua.cred.callback_whitelist ? JSON.parse(ua.cred.callback_whitelist) : []; } catch(e) {}
+                    if (wl.length && !wl.some(u => cbUrl.indexOf(String(u).replace(/\/$/, '')) === 0)) {
+                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                        return upErr(400, 'invalid_callback_url', 'callback_url is not in the whitelist');
+                    }
+                }
+                // 幂等
+                if (dsNo) {
+                    const oldRef = await db.prepare('SELECT * FROM api_order_refs WHERE credential_id=? AND downstream_order_no=?').bind(ua.cred.id, dsNo).first();
+                    if (oldRef) {
+                        const old = await db.prepare('SELECT * FROM orders WHERE id=?').bind(oldRef.order_id).first();
+                        if (old) {
+                            await logApiCall(db, ua, request, 200, 'idempotent_hit');
+                            return jsonRes({ ok: true, order_id: oldRef.id, order_no: old.id,
+                                status: old.status === 1 ? 'delivered' : (old.status === 0 ? 'pending_payment' : 'canceled'),
+                                amount: (parseFloat(old.total_amount) || 0).toFixed(2), currency: 'CNY' });
+                        }
+                    }
+                }
+                const v = await db.prepare('SELECT v.*, p.name as product_name, p.api_enabled, p.active as product_active, p.member_price_enabled FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id=?').bind(skuId).first();
+                if (!v || v.api_enabled !== 1 || v.product_active !== 1) {
+                    await logApiCall(db, ua, request, 400, 'product_unavailable');
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'product_unavailable', error_message: 'product is not available' });
+                }
+                if (v.active !== 1) {
+                    await logApiCall(db, ua, request, 400, 'sku_unavailable');
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'sku is not active' });
+                }
+                // 库存
+                const stock = await upStockOf(v);
+                if (stock < qty) {
+                    await logApiCall(db, ua, request, 400, 'sku_unavailable');
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'insufficient stock' });
+                }
+                // 计价
+                const unit = await apiUnitPrice(db, ua, v, { member_price_enabled: v.member_price_enabled }, qty);
+                const total = Math.round(unit * qty * 100) / 100;
+                // ⚠️ 协议约定：余额不足返回 HTTP 200 + ok:false + payment_failed
+                if ((parseFloat(ua.user.balance) || 0) < total) {
+                    await logApiCall(db, ua, request, 200, 'payment_failed');
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: total.toFixed(2), currency: 'CNY', error_code: 'payment_failed', error_message: 'wallet payment failed: insufficient balance' });
+                }
+                const orderId = uuid();
+                const now = time();
+                // 卡密原子抢占
+                let cards = [];
+                if (v.auto_delivery === 1) {
+                    const cands = (await db.prepare('SELECT id FROM cards WHERE variant_id=? AND status=0 ORDER BY id ASC LIMIT ?').bind(skuId, qty).all()).results || [];
+                    if (cands.length < qty) {
+                        return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'insufficient stock' });
+                    }
+                    const ids = cands.map(c => c.id);
+                    const ph = ids.map(() => '?').join(',');
+                    await db.prepare(`UPDATE cards SET status=1, order_id=? WHERE id IN (${ph}) AND status=0`).bind(orderId, ...ids).run();
+                    cards = (await db.prepare('SELECT id, content FROM cards WHERE order_id=? AND variant_id=? ORDER BY id ASC').bind(orderId, skuId).all()).results || [];
+                    if (cards.length < qty) {
+                        await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=? AND variant_id=?').bind(orderId, skuId).run();
+                        return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'stock race, please retry' });
+                    }
+                }
+                // 扣余额
+                const dec = await db.prepare('UPDATE users SET balance = balance - ?, updated_at=? WHERE id=? AND balance >= ?').bind(total, now, uid, total).run();
+                if (!dec.success || dec.meta.changes !== 1) {
+                    if (cards.length) await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(orderId).run();
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: total.toFixed(2), currency: 'CNY', error_code: 'payment_failed', error_message: 'wallet payment failed: insufficient balance' });
+                }
+                await db.prepare('INSERT INTO orders (id, trade_no, variant_id, product_name, variant_name, price, quantity, total_amount, contact, query_password, payment_method, created_at, status, cards_sent, user_id, order_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                    .bind(orderId, dsNo, skuId, v.product_name, v.name, unit, qty, total.toFixed(2),
+                        ua.user.email || uname, 'api_' + ua.cred.id, 'balance', now, 1,
+                        cards.length ? JSON.stringify(cards.map(c => ({ id: c.id, content: c.content }))) : null, uid, 'api').run();
+                await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+                    .bind(uid, -total, 'api_purchase', 'dujiao 采购 ' + v.product_name + ' x' + qty, orderId, now).run();
+                const refIns = await db.prepare('INSERT INTO api_order_refs (credential_id, order_id, downstream_order_no, trace_id, callback_url, callback_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+                    .bind(ua.cred.id, orderId, dsNo, traceId, cbUrl, cbUrl ? 'pending' : 'none', now).run();
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({ ok: true, order_id: refIns.meta.last_row_id, order_no: orderId,
+                    status: 'delivered', amount: total.toFixed(2), currency: 'CNY' });
+            }
+
+            // ---- GET /api/v1/upstream/orders/{id} ----
+            const ordMatch = path.match(/^\/api\/v1\/upstream\/orders\/(\d+)$/);
+            if (ordMatch && method === 'GET') {
+                const refId = parseInt(ordMatch[1]);
+                const ref = await db.prepare('SELECT * FROM api_order_refs WHERE id=? AND credential_id=?').bind(refId, ua.cred.id).first();
+                if (!ref) { await logApiCall(db, ua, request, 404, 'order_not_found'); return upErr(404, 'product_not_found', 'order not found'); }
+                const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(ref.order_id).first();
+                if (!o) { await logApiCall(db, ua, request, 404, 'order_not_found'); return upErr(404, 'product_not_found', 'order not found'); }
+                let payload = '';
+                try {
+                    const cr = (await db.prepare('SELECT content FROM cards WHERE order_id=? ORDER BY id ASC').bind(ref.order_id).all()).results || [];
+                    payload = cr.map(c => c.content).join('\n');
+                } catch(e) {}
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({
+                    order_id: ref.id, order_no: o.id,
+                    status: o.status === 1 ? 'delivered' : (o.status === 0 ? 'pending_payment' : 'canceled'),
+                    amount: (parseFloat(o.total_amount) || 0).toFixed(2),
+                    refunded_amount: '0.00', currency: 'CNY',
+                    fulfillment: o.status === 1 ? {
+                        type: 'auto', status: 'delivered', payload,
+                        delivery_data: {},
+                        delivered_at: new Date((o.paid_at || o.created_at || 0) * 1000).toISOString()
+                    } : null,
+                    refund_records: []
+                });
+            }
+
+            // ---- POST /api/v1/upstream/orders/{id}/cancel ----
+            const cancelMatch = path.match(/^\/api\/v1\/upstream\/orders\/(\d+)\/cancel$/);
+            if (cancelMatch && method === 'POST') {
+                const refId = parseInt(cancelMatch[1]);
+                const ref = await db.prepare('SELECT * FROM api_order_refs WHERE id=? AND credential_id=?').bind(refId, ua.cred.id).first();
+                if (!ref) { await logApiCall(db, ua, request, 404, 'order_not_found'); return upErr(404, 'product_not_found', 'order not found'); }
+                const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(ref.order_id).first();
+                if (!o) return jsonRes({ ok: false });
+                if (o.status !== 0) { await logApiCall(db, ua, request, 409, 'already_paid'); return jsonRes({ ok: false }); }
+                const now = time();
+                await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(ref.order_id).run();
+                await db.prepare('UPDATE users SET balance = balance + ?, updated_at=? WHERE id=?').bind(o.total_amount, now, uid).run();
+                await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+                    .bind(uid, parseFloat(o.total_amount), 'api_refund', 'dujiao 取消订单退回余额', ref.order_id, now).run();
+                await db.prepare('UPDATE orders SET status=2 WHERE id=?').bind(ref.order_id).run();
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({ ok: true });
+            }
+
+            await logApiCall(db, ua, request, 404, 'not_found');
+            return upErr(404, 'product_not_found', 'endpoint not found');
+        }
+
+        // ===========================
         // --- 开放 API (Open) /api/open/v1/* ---
         // ===========================
         if (path.startsWith('/api/open/v1/')) {
@@ -1513,6 +2204,11 @@ async function handleApi(request, env, url, ctx) {
 
             // ---- 5. 创建采购单 ----
             if (path === '/api/open/v1/order/create' && method === 'POST') {
+                // [v3] 递归深度守卫：A→B→A→B 无限循环保护
+                if (chainDepth(request) >= CHAIN_DEPTH_LIMIT) {
+                    await logApiCall(db, auth, request, 400, 'chain_depth_exceeded');
+                    return openErr(400, '链路过深，检测到可能的循环调用');
+                }
                 let body = {};
                 try { body = await request.json(); } catch(e) { await logApiCall(db, auth, request, 400, 'bad_request'); return openErr(400, '请求体必须是 JSON'); }
                 const goodsId = parseInt(body.goods_id);
@@ -1870,11 +2566,11 @@ async function handleApi(request, env, url, ctx) {
                 // [v2] 是否允许被 API 调用购买（白名单制，默认关闭）
                 const apiEnabled = data.api_enabled ? 1 : 0;
                 if (productId) {
-                    await db.prepare("UPDATE products SET name=?, description=?, category_id=?, sort=?, active=?, image_url=?, tags=?, seo_description=?, member_price_enabled=?, api_enabled=? WHERE id=?")
-                        .bind(data.name, data.description, data.category_id, data.sort, data.active, data.image_url, data.tags, data.seo_description, memberPriceEnabled, apiEnabled, productId).run();
+                    await db.prepare("UPDATE products SET name=?, description=?, category_id=?, sort=?, active=?, image_url=?, tags=?, seo_description=?, member_price_enabled=?, api_enabled=?, updated_at=? WHERE id=?")
+                        .bind(data.name, data.description, data.category_id, data.sort, data.active, data.image_url, data.tags, data.seo_description, memberPriceEnabled, apiEnabled, now, productId).run();
                 } else {
-                    const res = await db.prepare("INSERT INTO products (category_id, sort, active, created_at, name, description, image_url, tags, seo_description, member_price_enabled, api_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                        .bind(data.category_id, data.sort, data.active, now, data.name, data.description, data.image_url, data.tags, data.seo_description, memberPriceEnabled, apiEnabled).run();
+                    const res = await db.prepare("INSERT INTO products (category_id, sort, active, created_at, updated_at, name, description, image_url, tags, seo_description, member_price_enabled, api_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        .bind(data.category_id, data.sort, data.active, now, now, data.name, data.description, data.image_url, data.tags, data.seo_description, memberPriceEnabled, apiEnabled).run();
                     productId = res.meta.last_row_id;
                 }
 
@@ -3116,6 +3812,55 @@ async function handleApi(request, env, url, ctx) {
                 await applyAutoUpgrade(db, user_id);
                 const after = await db.prepare('SELECT member_level, auto_level, level_source FROM users WHERE id=?').bind(user_id).first();
                 return jsonRes({ success: true, member_level: after.member_level, auto_level: after.auto_level, level_source: after.level_source });
+            }
+
+            // ==================== [v3] 上游连接配置 + 自环防护 ====================
+            // ⚠️ 硬规则：绝不允许把本站地址配成上游，否则会形成无限递归下单
+            if (path === '/api/admin/upstream/connection/save' && method === 'POST') {
+                await ensureApiTables(db);
+                await ensureUpstreamConnTable(db);
+                const { id, name, base_url, protocol, api_key, api_secret, enabled } = await request.json();
+                if (!base_url) return errRes('缺少 base_url');
+                let u;
+                try { u = new URL(base_url); } catch(e) { return errRes('base_url 不是合法 URL'); }
+                if (!/^https?:$/.test(u.protocol)) return errRes('base_url 必须是 http(s)');
+                const upstreamHost = u.hostname.toLowerCase();
+                const selfHosts = new Set();
+                try { const sh = request.headers.get('Host'); if (sh) selfHosts.add(sh.split(':')[0].toLowerCase()); } catch(e) {}
+                try {
+                    const rows = (await db.prepare("SELECT key, value FROM site_config WHERE key IN ('site_domain','custom_domain')").all()).results || [];
+                    rows.forEach(r => { if (r.value) selfHosts.add(String(r.value).replace(/^https?:\/\//, '').split('/')[0].split(':')[0].toLowerCase()); });
+                } catch(e) {}
+                if (selfHosts.has(upstreamHost)) {
+                    return errRes('【已阻止】不能把本站地址配成上游，否则会形成无限递归下单：' + upstreamHost);
+                }
+                if (upstreamHost === 'localhost' || upstreamHost.endsWith('.local') || upstreamHost.endsWith('.internal') ||
+                    /^127\./.test(upstreamHost) || /^10\./.test(upstreamHost) || /^192\.168\./.test(upstreamHost) ||
+                    /^172\.(1[6-9]|2\d|3[01])\./.test(upstreamHost) || /^169\.254\./.test(upstreamHost) || upstreamHost === '::1' || upstreamHost === '0.0.0.0') {
+                    return errRes('上游地址不能是内网/回环地址：' + upstreamHost);
+                }
+                const proto = ['dujiao-next', 'acg-faka', 'open-v1'].includes(protocol) ? protocol : 'open-v1';
+                const now = time();
+                if (id) {
+                    await db.prepare('UPDATE upstream_connections SET name=?, base_url=?, protocol=?, api_key=?, api_secret=?, enabled=?, updated_at=? WHERE id=?')
+                        .bind(name || upstreamHost, u.origin, proto, api_key || '', api_secret || '', enabled === false ? 0 : 1, now, id).run();
+                    return jsonRes({ success: true, id });
+                }
+                const ins = await db.prepare('INSERT INTO upstream_connections (name, base_url, protocol, api_key, api_secret, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                    .bind(name || upstreamHost, u.origin, proto, api_key || '', api_secret || '', enabled === false ? 0 : 1, now, now).run();
+                return jsonRes({ success: true, id: ins.meta.last_row_id });
+            }
+            if (path === '/api/admin/upstream/connection/list') {
+                await ensureUpstreamConnTable(db);
+                const rows = (await db.prepare('SELECT id, name, base_url, protocol, api_key, enabled, last_sync_at, created_at, updated_at FROM upstream_connections ORDER BY id DESC').all()).results || [];
+                return jsonRes({ connections: rows });
+            }
+            if (path === '/api/admin/upstream/connection/delete' && method === 'POST') {
+                await ensureUpstreamConnTable(db);
+                const { id } = await request.json();
+                if (!id) return errRes('缺少连接 ID');
+                await db.prepare('DELETE FROM upstream_connections WHERE id=?').bind(id).run();
+                return jsonRes({ success: true });
             }
 
             // ==================== [v2] API Key 管理 ====================
