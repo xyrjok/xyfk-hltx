@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS api_credentials (
     status TEXT NOT NULL DEFAULT 'approved',
     is_active INTEGER NOT NULL DEFAULT 1,
     reject_reason TEXT,
+    scopes TEXT DEFAULT '',
     rate_limit_per_min INTEGER DEFAULT 60,
     price_mode TEXT DEFAULT 'member',
     allow_callback INTEGER DEFAULT 1,
@@ -298,6 +299,36 @@ CREATE TABLE IF NOT EXISTS api_call_logs (
     created_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_acl_user ON api_call_logs(user_id, created_at);
+
+-- 18a. [v3+] 上游连接（采购方适配器）
+CREATE TABLE IF NOT EXISTS upstream_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    base_url TEXT NOT NULL,
+    protocol TEXT DEFAULT 'open-v1',
+    api_key TEXT,
+    api_secret TEXT,
+    enabled INTEGER DEFAULT 1,
+    last_sync_at INTEGER,
+    created_at INTEGER,
+    updated_at INTEGER
+);
+
+-- 18b. [v3+] 上游 SKU ↔ 本地规格 映射（sync 建立，purchase 自动补货用）
+CREATE TABLE IF NOT EXISTS upstream_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    connection_id INTEGER NOT NULL,
+    upstream_product_id TEXT,
+    upstream_sku_id TEXT NOT NULL,
+    local_product_id INTEGER,
+    local_variant_id INTEGER,
+    name TEXT,
+    price REAL DEFAULT 0,
+    stock INTEGER DEFAULT 0,
+    created_at INTEGER,
+    updated_at INTEGER,
+    UNIQUE(connection_id, upstream_sku_id)
+);
 
 -- 19. 频率限制表 (独立于 site_config，便于管理和自动清理)
 CREATE TABLE IF NOT EXISTS rate_limits (
