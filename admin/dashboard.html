@@ -223,6 +223,47 @@
                 </div>
             </div>
         </div>
+
+        <!-- [新增] API 额度告警：把 api_call_logs 聚合成可告警指标，异常直接标红 -->
+        <div class="mt-4">
+            <div id="api-alert" class="alert py-2 d-none" style="font-size: 13px;"></div>
+            <div class="card shadow-sm border-0" id="api-quota-card">
+                <div class="card-body p-0">
+                    <div class="d-flex justify-content-between align-items-center p-3 pb-2">
+                        <span class="fw-semibold"><i class="fas fa-tachometer-alt me-1"></i>API 调用额度</span>
+                        <span class="text-muted" style="font-size:12px;" id="api-last-call">最近调用：-</span>
+                    </div>
+                    <div class="row g-0 text-center" style="font-size: 14px;">
+                        <div class="col-md-3 col-6 py-2">
+                            <div class="text-muted" style="font-size:12px;">今日调用</div>
+                            <div class="fs-5 fw-semibold" id="api-today">-</div>
+                        </div>
+                        <div class="col-md-3 col-6 py-2">
+                            <div class="text-muted" style="font-size:12px;">今日失败</div>
+                            <div class="fs-5 fw-semibold" id="api-today-fail">-</div>
+                        </div>
+                        <div class="col-md-3 col-6 py-2">
+                            <div class="text-muted" style="font-size:12px;">今日失败率</div>
+                            <div class="fs-5 fw-semibold" id="api-fail-rate">-</div>
+                        </div>
+                        <div class="col-md-3 col-6 py-2">
+                            <div class="text-muted" style="font-size:12px;">最近 7 天</div>
+                            <div class="fs-5 fw-semibold" id="api-week">-</div>
+                        </div>
+                    </div>
+                    <div class="row g-0 border-top" style="font-size: 13px;">
+                        <div class="col-md-6 border-end">
+                            <div class="p-3 pb-1 text-muted" style="font-size:12px;">失败原因 Top</div>
+                            <table class="table table-sm mb-0"><tbody id="api-errors"><tr><td class="text-muted">无</td></tr></tbody></table>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 pb-1 text-muted" style="font-size:12px;">调用方 Top</div>
+                            <table class="table table-sm mb-0"><tbody id="api-callers"><tr><td class="text-muted">无</td></tr></tbody></table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
         
         <div class="mt-4">
             <div class="alert alert-info py-2" style="font-size: 13px;">
@@ -316,8 +357,50 @@
             renderIncome();
             
             document.getElementById('s-cards').innerText = data.cards_unsold || 0;
+            renderApiQuota(data.api);
         }
     })();
+
+    // --- [新增] API 额度告警渲染 ---
+    function renderApiQuota(a) {
+        if (!a) return;
+        const fmt = (n) => (n === undefined || n === null) ? '-' : Number(n).toLocaleString();
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
+        set('api-today', fmt(a.today));
+        set('api-today-fail', fmt(a.today_fail));
+        set('api-fail-rate', (a.fail_rate || 0) + '%');
+        set('api-week', fmt(a.week) + '（失败 ' + fmt(a.week_fail) + '）');
+        set('api-last-call', '最近调用：' + (a.last_call_at ? new Date(a.last_call_at * 1000).toLocaleString() : '无'));
+
+        // 失败率 / 调用量 标红
+        const rateEl = document.getElementById('api-fail-rate');
+        if (rateEl) rateEl.classList.toggle('text-danger', !!a.alert_fail_rate);
+        const todayEl = document.getElementById('api-today');
+        if (todayEl) todayEl.classList.toggle('text-danger', !!a.alert_volume);
+
+        // 告警条
+        const tips = [];
+        if (a.alert_fail_rate) tips.push('今日 API 失败率 ' + a.fail_rate + '%（阈值 10%），请排查下游时钟漂移 / 签名错误 / 余额不足');
+        if (a.alert_volume) tips.push('今日 API 调用量 ' + fmt(a.today) + ' 次（阈值 5000），注意 Cloudflare Workers/D1 免费额度消耗，谨防盗刷');
+        const box = document.getElementById('api-alert');
+        if (box) {
+            if (tips.length) {
+                box.className = 'alert alert-danger py-2';
+                box.innerHTML = '<i class="fas fa-exclamation-triangle me-1"></i>' + tips.join('；');
+            } else {
+                box.className = 'alert alert-success py-2';
+                box.innerHTML = '<i class="fas fa-check-circle me-1"></i>API 调用正常（今日 ' + fmt(a.today) + ' 次，失败率 ' + (a.fail_rate || 0) + '%）';
+            }
+        }
+
+        const fill = (id, rows, html) => {
+            const tb = document.getElementById(id);
+            if (!tb) return;
+            tb.innerHTML = (rows && rows.length) ? rows.map(html).join('') : '<tr><td class="text-muted">无</td></tr>';
+        };
+        fill('api-errors', a.top_errors, r => '<tr><td><code>' + (r.code || '(无)') + '</code></td><td class="text-end">' + fmt(r.count) + '</td></tr>');
+        fill('api-callers', a.top_callers, r => '<tr><td>' + (r.name || ('key_' + r.cred_id)) + '</td><td class="text-end">' + fmt(r.count) + '</td></tr>');
+    }
     // --- MyBlog 风格移动端菜单逻辑 ---
     const mobileBtn = document.getElementById('mobile-menu-toggle');
     const sidebar = document.getElementById('sidebar');

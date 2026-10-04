@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS categories (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     name      TEXT NOT NULL,
     sort      INTEGER DEFAULT 0,
-    image_url TEXT
+    image_url TEXT,
+    updated_at INTEGER
 );
 INSERT OR IGNORE INTO categories (id, name, sort, image_url) VALUES (1, '谷歌美国电话/GoogleVoice /GV靓号AAA', 0, 'https://fengzi.eu.org/image/07f005d6-068f-4328-a90c-dad528e9f52a.webp');
 
@@ -45,7 +46,9 @@ CREATE TABLE IF NOT EXISTS products (
     seo_description TEXT,
     member_price_enabled INTEGER DEFAULT 1,
     -- [v2] 是否允许被外部平台通过 /api/open/v1 调用购买（白名单制，默认关闭）
-    api_enabled INTEGER DEFAULT 0
+    api_enabled INTEGER DEFAULT 0,
+    -- [修复] 最后变更时间（增量同步 / updated_after 用）；规格/卡密变动时由触发器联动推高
+    updated_at  INTEGER
 );
 
 INSERT OR IGNORE INTO products (id, category_id, name, description, sort, active, created_at, image_url, tags, seo_description) VALUES (1, 1, '(AAA老号)GoogleVoice /GV靓号', '<p style="line-height: 1;">发货格式有两种：</p>
@@ -93,6 +96,9 @@ CREATE TABLE IF NOT EXISTS variants (
     sort             INTEGER DEFAULT 0,
     active           INTEGER DEFAULT 1,
     random_mode_text TEXT,
+    -- [修复] 最后变更时间：规格价格/库存变动时联动推高 products.updated_at，
+    --        保证下游 /api/v1/upstream/products?updated_after= 增量同步不漏规格变更
+    updated_at       INTEGER,
     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
 );
 INSERT OR IGNORE INTO variants (id, product_id, name, price, stock, color, image_url, wholesale_config, custom_markup, sales_count, auto_delivery, created_at, selection_label, sort, active, random_mode_text) VALUES

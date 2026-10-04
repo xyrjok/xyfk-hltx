@@ -1057,7 +1057,78 @@ async function ensureProductColumns(db) {
     try { await db.prepare('ALTER TABLE products ADD COLUMN member_price_enabled INTEGER DEFAULT 1').run(); } catch(e) {}
     // [v2] 商品是否允许被 API 调用购买（默认关闭，需后台逐个开启）
     try { await db.prepare('ALTER TABLE products ADD COLUMN api_enabled INTEGER DEFAULT 0').run(); } catch(e) {}
+    // [修复] 增量同步缺 updated_at：原方案只给 products 补了，漏了 variants / categories，
+    //        导致「只改规格价格/库存」的变更不会让下游 updated_after 发现，同步漏单。
+    //        这里三张表都补上，并由下面的触发器统一联动。
+    try { await db.prepare('ALTER TABLE products ADD COLUMN updated_at INTEGER').run(); } catch(e) {}
+    try { await db.prepare('ALTER TABLE variants ADD COLUMN updated_at INTEGER').run(); } catch(e) {}
+    try { await db.prepare('ALTER TABLE categories ADD COLUMN updated_at INTEGER').run(); } catch(e) {}
+    // [修复] 存量回填：让历史行有确定的变更时间，否则 updated_after 过滤对旧行永远失效。
+    //        幂等（只填 NULL），且只跑一次。
+    try { await db.prepare('UPDATE products SET updated_at = created_at WHERE updated_at IS NULL').run(); } catch(e) {}
+    try { await db.prepare('UPDATE variants SET updated_at = created_at WHERE updated_at IS NULL').run(); } catch(e) {}
+    await ensureProductTouchTriggers(db);
     _productSchemaEnsured = true;
+}
+
+// [修复] 规格/卡密变更联动推高 products.updated_at。
+// 为什么用触发器而不是在每处 JS 里补一行：variants 的写操作散布在 20+ 处
+// （商品保存、商品导入、卡密导入/删除、下单扣库存、取消回滚、上游同步……），
+// 手工逐个补必然漏；触发器在 SQL 层兜底，任何现有/未来的写入都覆盖。
+// 触发器均为 IF NOT EXISTS，重复执行无副作用；单条 UPDATE 成本可忽略。
+// 注：卡密只在 status 变更（占用/释放）时触发，避免大批量导入卡密时逐行回写。
+let _productTouchTriggersEnsured = false;
+async function ensureProductTouchTriggers(db) {
+    if (_productTouchTriggersEnsured) return;
+    const nowSql = "CAST(strftime('%s','now') AS INTEGER)";
+    const triggers = [
+        `CREATE TRIGGER IF NOT EXISTS trg_variants_touch_product_ai AFTER INSERT ON variants BEGIN
+            UPDATE products SET updated_at = ${nowSql} WHERE id = NEW.product_id;
+         END`,
+        `CREATE TRIGGER IF NOT EXISTS trg_variants_touch_product_au AFTER UPDATE ON variants BEGIN
+            UPDATE products SET updated_at = ${nowSql} WHERE id = NEW.product_id;
+         END`,
+        `CREATE TRIGGER IF NOT EXISTS trg_variants_touch_product_ad AFTER DELETE ON variants BEGIN
+            UPDATE products SET updated_at = ${nowSql} WHERE id = OLD.product_id;
+         END`,
+        `CREATE TRIGGER IF NOT EXISTS trg_cards_touch_product_au AFTER UPDATE OF status ON cards BEGIN
+            UPDATE products SET updated_at = ${nowSql}
+             WHERE id IN (SELECT product_id FROM variants WHERE id = NEW.variant_id);
+         END`,
+    ];
+    for (const ddl of triggers) {
+        try { await db.prepare(ddl).run(); } catch(e) {}
+    }
+    _productTouchTriggersEnsured = true;
+}
+
+// [修复] 显式联动工具（触发器之外的兑底；也给 categories 用，categories 没有子表）
+async function touchProductsByVariant(db, variantId) {
+    try {
+        await db.prepare('UPDATE products SET updated_at=? WHERE id IN (SELECT product_id FROM variants WHERE id=?)')
+            .bind(time(), variantId).run();
+    } catch(e) {}
+}
+async function touchProducts(db, productIds) {
+    try {
+        const ids = (Array.isArray(productIds) ? productIds : [productIds]).filter(Boolean);
+        if (!ids.length) return;
+        await db.prepare(`UPDATE products SET updated_at=? WHERE id IN (${ids.map(() => '?').join(',')})`)
+            .bind(time(), ...ids).run();
+    } catch(e) {}
+}
+async function touchCategory(db, catId) {
+    try { await db.prepare('UPDATE categories SET updated_at=? WHERE id=?').bind(time(), catId).run(); } catch(e) {}
+}
+// 订单链路的卡密占用/释放只翻 cards.status、不写 variants，
+// 所以取消回滚这类路径需要单独把受影响商品的变更时间推高。
+async function touchProductsByOrder(db, orderId) {
+    try {
+        await db.prepare(`UPDATE products SET updated_at=? WHERE id IN (
+            SELECT DISTINCT v.product_id FROM variants v
+             WHERE v.id IN (SELECT variant_id FROM cards WHERE order_id=?))`)
+            .bind(time(), orderId).run();
+    } catch(e) {}
 }
 
 // [统一口径] 会员折扣解析：只认 member_levels[member_level].discount
@@ -1448,10 +1519,13 @@ async function ensureApiTables(db) {
             created_at INTEGER
         )`,
         'CREATE INDEX IF NOT EXISTS idx_acl_user ON api_call_logs(user_id, created_at)',
+        // [修复] dashboard 额度告警需按时间全局聚合，否则 api_call_logs 增长后逐行全表扫描
+        'CREATE INDEX IF NOT EXISTS idx_acl_created ON api_call_logs(created_at)',
+        'CREATE INDEX IF NOT EXISTS idx_acl_error ON api_call_logs(created_at, error_code)',
         // 商品：是否允许被 API 调用购买
         'ALTER TABLE products ADD COLUMN api_enabled INTEGER DEFAULT 0',
         // 商品：最后变更时间（增量同步 / updated_after 用）
-        'ALTER TABLE products ADD COLUMN updated_at INTEGER',
+        // [修复] 改由 ensureProductColumns 统一处理（含 variants/categories 及联动触发器）
         // 订单类型：shop=零售 / recharge=充值 / api=API采购（避免靠商品名字符串区分）
         "ALTER TABLE orders ADD COLUMN order_type TEXT DEFAULT 'shop'",
         // 卡密渠道溯源
@@ -1461,6 +1535,9 @@ async function ensureApiTables(db) {
     ]) {
         try { await db.prepare(ddl).run(); } catch(e) {}
     }
+    // [修复] 开放 API 路径也要保证商品/规格表结构与联动触发器就绪，
+    //        否则 updated_after 过滤会因缺 updated_at 列而静默失效。
+    await ensureProductColumns(db);
     _apiSchemaEnsured = true;
 }
 
@@ -1740,7 +1817,13 @@ async function handleApi(request, env, url, ctx) {
             await ensureMemberTables(db);
         }
         // [新增] 商品/下单相关请求先确保商品表结构完整（旧库缺 member_price_enabled 列会导致 500）
-        if (path.startsWith('/api/admin/product') || path.startsWith('/api/shop/product') || path === '/api/shop/order/create' || path === '/api/shop/cart/checkout') {
+        // [修复] 分类/卡密同样会写 updated_at 或联动推高 products.updated_at，一并纳入
+        if (path.startsWith('/api/admin/product') || path.startsWith('/api/shop/product')
+            || path === '/api/shop/order/create' || path === '/api/shop/cart/checkout'
+            || path.startsWith('/api/admin/category') || path === '/api/shop/categories'
+            || path.startsWith('/api/admin/card') || path.startsWith('/api/admin/cards')
+            || path.startsWith('/api/admin/upstream') || path.startsWith('/api/v1/upstream')
+            || path.startsWith('/api/open/v1') || path.startsWith('/shared/')) {
             await ensureProductColumns(db);
         }
         // ===========================
@@ -2060,7 +2143,16 @@ async function handleApi(request, env, url, ctx) {
                 if (!includeInactive) where += ' AND active=1';
                 if (updatedAfter) {
                     const ts = Math.floor(new Date(updatedAfter).getTime() / 1000);
-                    if (!isNaN(ts)) { where += ' AND (updated_at IS NULL OR updated_at >= ? OR (updated_at IS NULL AND created_at >= ?))'; binds.push(ts, ts); }
+                    if (!isNaN(ts)) {
+                        // [修复] 原条件 `updated_at IS NULL OR ...` 会把所有 updated_at 为 NULL 的历史行
+                        //        无条件当成“已变更”，增量同步永远退化为全量拉取。
+                        //        改为 COALESCE 兑底时间；同时兼容地把「近期变动过的规格」也算进变更集，
+                        //        避免只改规格价/库存时下游拉不到。
+                        where += ` AND (COALESCE(products.updated_at, products.created_at, 0) >= ?
+                                   OR EXISTS (SELECT 1 FROM variants v WHERE v.product_id = products.id
+                                              AND COALESCE(v.updated_at, v.created_at, 0) >= ?))`;
+                        binds.push(ts, ts);
+                    }
                 }
                 const total = (await db.prepare(`SELECT COUNT(*) as c FROM products ${where}`).bind(...binds).first() || {}).c || 0;
                 const rows = (await db.prepare(`SELECT * FROM products ${where} ORDER BY sort DESC, id ASC LIMIT ? OFFSET ?`)
@@ -2265,6 +2357,7 @@ async function handleApi(request, env, url, ctx) {
                 if (o.status !== 0) { await logApiCall(db, ua, request, 409, 'already_paid'); return jsonRes({ ok: false }); }
                 const now = time();
                 await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(ref.order_id).run();
+                await touchProductsByOrder(db, ref.order_id);
                 await db.prepare('UPDATE users SET balance = balance + ?, updated_at=? WHERE id=?').bind(o.total_amount, now, uid).run();
                 await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
                     .bind(uid, parseFloat(o.total_amount), 'api_refund', 'dujiao 取消订单退回余额', ref.order_id, now).run();
@@ -2564,6 +2657,7 @@ async function handleApi(request, env, url, ctx) {
                 if (o.status !== 0) { await logApiCall(db, auth, request, 409, 'already_paid'); return openErr(409, '订单已支付/已发货，无法取消'); }
                 const now = time();
                 await db.prepare('UPDATE cards SET status=0, order_id=NULL, api_ref_id=NULL WHERE order_id=?').bind(orderId).run();
+                await touchProductsByOrder(db, orderId);
                 await db.prepare('UPDATE users SET balance = balance + ?, updated_at=? WHERE id=?').bind(o.total_amount, now, auth.user.id).run();
                 await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
                     .bind(auth.user.id, parseFloat(o.total_amount), 'api_refund', 'API 取消订单退回余额', orderId, now).run();
@@ -2668,6 +2762,9 @@ async function handleApi(request, env, url, ctx) {
             
             // --- 仪表盘 (升级版：支持多时间维度) ---
             if (path === '/api/admin/dashboard') {
+                // [修复] 新库首次进后台时 api_call_logs 可能尚未建表，
+                //        直接查会让整个 dashboard 500。先幂等补齐。
+                await ensureApiTables(db);
                 const now = Math.floor(Date.now() / 1000);
                 const today = new Date().setHours(0,0,0,0) / 1000;
                 const week = now - 7 * 86400;   // 最近7天
@@ -2678,7 +2775,10 @@ async function handleApi(request, env, url, ctx) {
                 const [
                     r_o_today, r_o_week, r_o_month,
                     r_i_today, r_i_week, r_i_month, r_i_year,
-                    r_cards, r_pending
+                    r_cards, r_pending,
+                    // [修复] API 额度告警（阶段5）：把 api_call_logs 聚合成可告警的指标
+                    r_api_today, r_api_today_fail, r_api_week, r_api_week_fail,
+                    r_api_errs, r_api_top, r_api_last
                 ] = await Promise.all([
                     // 订单数统计
                     db.prepare("SELECT COUNT(*) as c FROM orders WHERE created_at >= ?").bind(today).first(),
@@ -2693,8 +2793,25 @@ async function handleApi(request, env, url, ctx) {
                     
                     // 其他
                     db.prepare("SELECT COUNT(*) as c FROM cards WHERE status = 0").first(),
-                    db.prepare("SELECT COUNT(*) as c FROM orders WHERE status = 0").first()
+                    db.prepare("SELECT COUNT(*) as c FROM orders WHERE status = 0").first(),
+
+                    // API 调用量 / 失败数
+                    db.prepare("SELECT COUNT(*) as c FROM api_call_logs WHERE created_at >= ?").bind(today).first(),
+                    db.prepare("SELECT COUNT(*) as c FROM api_call_logs WHERE created_at >= ? AND status_code >= 400").bind(today).first(),
+                    db.prepare("SELECT COUNT(*) as c FROM api_call_logs WHERE created_at >= ?").bind(week).first(),
+                    db.prepare("SELECT COUNT(*) as c FROM api_call_logs WHERE created_at >= ? AND status_code >= 400").bind(week).first(),
+                    // 失败原因 Top（定位时钟漂移/签名错/余额不足等）
+                    db.prepare("SELECT COALESCE(error_code,'(无)') as code, COUNT(*) as c FROM api_call_logs WHERE created_at >= ? AND status_code >= 400 GROUP BY error_code ORDER BY c DESC LIMIT 8").bind(today).all(),
+                    // 调用方 Top（发现被盗用的 key）
+                    db.prepare("SELECT l.credential_id as cred_id, u.username, u.email, COUNT(*) as c FROM api_call_logs l LEFT JOIN users u ON u.id = l.user_id WHERE l.created_at >= ? AND l.credential_id IS NOT NULL GROUP BY l.credential_id ORDER BY c DESC LIMIT 8").bind(today).all(),
+                    db.prepare("SELECT MAX(created_at) as t FROM api_call_logs").first()
                 ]);
+
+                const apiToday = r_api_today.c || 0;
+                const apiTodayFail = r_api_today_fail.c || 0;
+                const apiWeek = r_api_week.c || 0;
+                const apiWeekFail = r_api_week_fail.c || 0;
+                const failRate = apiToday > 0 ? Math.round(apiTodayFail / apiToday * 1000) / 10 : 0;
 
                 const stats = {
                     orders: {
@@ -2709,7 +2826,26 @@ async function handleApi(request, env, url, ctx) {
                         year: r_i_year.s || 0
                     },
                     cards_unsold: r_cards.c,
-                    orders_pending: r_pending.c
+                    orders_pending: r_pending.c,
+                    // [修复] API 额度告警：前端据此标红
+                    api: {
+                        today: apiToday,
+                        today_fail: apiTodayFail,
+                        fail_rate: failRate,          // 百分比，1 位小数
+                        week: apiWeek,
+                        week_fail: apiWeekFail,
+                        week_fail_rate: apiWeek > 0 ? Math.round(apiWeekFail / apiWeek * 1000) / 10 : 0,
+                        top_errors: (r_api_errs.results || []).map(r => ({ code: r.code, count: r.c })),
+                        top_callers: (r_api_top.results || []).map(r => ({
+                            cred_id: r.cred_id,
+                            name: r.username || r.email || ('key_' + r.cred_id),
+                            count: r.c
+                        })),
+                        last_call_at: r_api_last.t || 0,
+                        // 告警阈值（前端只负责标红，阈值判定在服务端，口径统一）
+                        alert_fail_rate: failRate >= 10,
+                        alert_volume: apiToday >= 5000
+                    }
                 };
                 
                 return jsonRes(stats);
@@ -2723,16 +2859,16 @@ async function handleApi(request, env, url, ctx) {
             if (path === '/api/admin/category/save' && method === 'POST') {
                 const { id, name, sort, image_url } = await request.json();
                 if (id) {
-                    await db.prepare("UPDATE categories SET name=?, sort=?, image_url=? WHERE id=?").bind(name, sort, image_url, id).run();
+                    await db.prepare("UPDATE categories SET name=?, sort=?, image_url=?, updated_at=? WHERE id=?").bind(name, sort, image_url, time(), id).run();
                 } else {
-                    await db.prepare("INSERT INTO categories (name, sort, image_url) VALUES (?, ?, ?)").bind(name, sort, image_url).run();
+                    await db.prepare("INSERT INTO categories (name, sort, image_url, updated_at) VALUES (?, ?, ?, ?)").bind(name, sort, image_url, time()).run();
                 }
                 return jsonRes({ success: true });
             }
             if (path === '/api/admin/category/delete' && method === 'POST') {
                 const { id } = await request.json();
                 if (id === 1) return errRes('默认分类不能删除');
-                await db.prepare("UPDATE products SET category_id = 1 WHERE category_id = ?").bind(id).run();
+                await db.prepare("UPDATE products SET category_id = 1, updated_at = ? WHERE category_id = ?").bind(time(), id).run();
                 await db.prepare("DELETE FROM categories WHERE id = ?").bind(id).run();
                 return jsonRes({ success: true });
             }
@@ -2799,11 +2935,11 @@ async function handleApi(request, env, url, ctx) {
                 
                 // 增加 selection_label 和 random_mode_text 字段
                 const insertStmt = db.prepare(`
-                    INSERT INTO variants (product_id, name, price, stock, color, image_url, wholesale_config, custom_markup, auto_delivery, sales_count, created_at, random_mode_text, selection_label, sort, active) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO variants (product_id, name, price, stock, color, image_url, wholesale_config, custom_markup, auto_delivery, sales_count, created_at, random_mode_text, selection_label, sort, active, updated_at) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `);
                 const updateStmt = db.prepare(`
-                    UPDATE variants SET name=?, price=?, stock=?, color=?, image_url=?, wholesale_config=?, custom_markup=?, auto_delivery=?, sales_count=?, random_mode_text=?, selection_label=?, sort=?, active=?
+                    UPDATE variants SET name=?, price=?, stock=?, color=?, image_url=?, wholesale_config=?, custom_markup=?, auto_delivery=?, sales_count=?, random_mode_text=?, selection_label=?, sort=?, active=?, updated_at=?
                     WHERE id=? AND product_id=?
                 `);
 
@@ -2820,7 +2956,7 @@ async function handleApi(request, env, url, ctx) {
                                 v.name, v.price, stock, v.color, v.image_url, wholesale_config_json, 
                                 v.custom_markup || 0, auto_delivery, v.sales_count || 0,
                                 v.random_mode_text || null, v.selection_label || null,
-                                v.sort || 0, v.active,
+                                v.sort || 0, v.active, now,
                                 variantId, productId
                             )
                         );
@@ -2830,7 +2966,7 @@ async function handleApi(request, env, url, ctx) {
                                 productId, v.name, v.price, stock, v.color, v.image_url, wholesale_config_json,
                                 v.custom_markup || 0, auto_delivery, v.sales_count || 0, now,
                                 v.random_mode_text || null, v.selection_label || null,
-                                v.sort || 0, v.active
+                                v.sort || 0, v.active, now
                             )
                         );
                     }
@@ -2990,7 +3126,7 @@ async function handleApi(request, env, url, ctx) {
                 }
                 const createdCategories = [];
                 if (needCats.length > 0) {
-                    const catStmts = needCats.map(c => db.prepare("INSERT INTO categories (name, sort, image_url) VALUES (?, ?, ?)").bind(c.name, c.sort, c.image_url));
+                    const catStmts = needCats.map(c => db.prepare("INSERT INTO categories (name, sort, image_url, updated_at) VALUES (?, ?, ?, ?)").bind(c.name, c.sort, c.image_url, time()));
                     for (let i = 0; i < catStmts.length; i += 50) {
                         const batchRes = await db.batch(catStmts.slice(i, i + 50));
                         batchRes.forEach((r, idx) => {
@@ -3058,7 +3194,7 @@ async function handleApi(request, env, url, ctx) {
                         if (v.wholesale_config !== null && v.wholesale_config !== undefined && v.wholesale_config !== '') {
                             wholesaleJson = (typeof v.wholesale_config === 'string') ? v.wholesale_config : JSON.stringify(v.wholesale_config);
                         }
-                        vStmts.push(db.prepare("INSERT INTO variants (product_id, name, price, stock, color, image_url, wholesale_config, custom_markup, sales_count, auto_delivery, created_at, selection_label, sort, active, random_mode_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                        vStmts.push(db.prepare("INSERT INTO variants (product_id, name, price, stock, color, image_url, wholesale_config, custom_markup, sales_count, auto_delivery, created_at, selection_label, sort, active, random_mode_text, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                             .bind(
                                 x.newId,
                                 String(v.name).trim(),
@@ -3074,7 +3210,8 @@ async function handleApi(request, env, url, ctx) {
                                 v.selection_label || null,
                                 Number(v.sort) || 0,
                                 v.active === undefined ? 1 : (Number(v.active) ? 1 : 0),
-                                v.random_mode_text || null
+                                v.random_mode_text || null,
+                                now
                             ));
                         importedVariants++;
                     }
@@ -3092,7 +3229,7 @@ async function handleApi(request, env, url, ctx) {
                         const placeholders = ids.map(() => '?').join(',');
                         await db.prepare(`
                             UPDATE variants
-                            SET stock = (SELECT COUNT(*) FROM cards WHERE variant_id = variants.id AND status = 0)
+                            SET stock = (SELECT COUNT(*) FROM cards WHERE variant_id = variants.id AND status = 0), updated_at = ${now}
                             WHERE product_id IN (${placeholders}) AND (auto_delivery = 1 OR (SELECT COUNT(*) FROM cards WHERE variant_id = variants.id AND status = 0) > 0)
                         `).bind(...ids).run();
                     }
@@ -3274,6 +3411,7 @@ async function handleApi(request, env, url, ctx) {
                     // 更新库存
                     await db.prepare("UPDATE variants SET stock = (SELECT COUNT(*) FROM cards WHERE variant_id=? AND status=0) WHERE id = ?")
                         .bind(variant_id, variant_id).run();
+                    await touchProductsByVariant(db, variant_id);
                 }
                 return jsonRes({ imported: cards.length });
             }
@@ -3358,6 +3496,7 @@ async function handleApi(request, env, url, ctx) {
                 // 更新库存
                 await db.prepare("UPDATE variants SET stock = (SELECT COUNT(*) FROM cards WHERE variant_id=? AND status=0) WHERE id = ?")
                         .bind(card.variant_id, card.variant_id).run();
+                await touchProductsByVariant(db, card.variant_id);
                 return jsonRes({ success: true });
             }
 
@@ -4132,10 +4271,10 @@ async function handleApi(request, env, url, ctx) {
                                         row.updated++;
                                     } else {
                                         // 新上游 SKU：建本地商品（默认不对外开放，管理员手动开白名单）+ 规格
-                                        const prodIns = await db.prepare('INSERT INTO products (category_id, name, description, sort, active, created_at, member_price_enabled, api_enabled) VALUES (1, ?, ?, 0, 1, ?, 1, 0)')
-                                            .bind(title, '[上游代销] ' + title, now2).run();
-                                        const varIns = await db.prepare('INSERT INTO variants (product_id, name, price, stock, auto_delivery, created_at, active) VALUES (?, ?, ?, 0, 1, ?, 1)')
-                                            .bind(prodIns.meta.last_row_id, sk.name || (title + ' ' + extSku), parseFloat(sk.price_amount) || 0, now2).run();
+                                        const prodIns = await db.prepare('INSERT INTO products (category_id, name, description, sort, active, created_at, updated_at, member_price_enabled, api_enabled) VALUES (1, ?, ?, 0, 1, ?, ?, 1, 0)')
+                                            .bind(title, '[上游代销] ' + title, now2, now2).run();
+                                        const varIns = await db.prepare('INSERT INTO variants (product_id, name, price, stock, auto_delivery, created_at, updated_at, active) VALUES (?, ?, ?, 0, 1, ?, ?, 1)')
+                                            .bind(prodIns.meta.last_row_id, sk.name || (title + ' ' + extSku), parseFloat(sk.price_amount) || 0, now2, now2).run();
                                         await db.prepare('INSERT INTO upstream_items (connection_id, upstream_product_id, upstream_sku_id, local_product_id, local_variant_id, name, price, stock, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
                                             .bind(conn.id, String(it.id), extSku, prodIns.meta.last_row_id, varIns.meta.last_row_id,
                                                 title + ' / ' + (sk.name || ''), parseFloat(sk.price_amount) || 0,
@@ -4193,6 +4332,13 @@ async function handleApi(request, env, url, ctx) {
                     const ins = await db.prepare('INSERT INTO cards (variant_id, content, status, order_id, created_at) VALUES (?, ?, 0, NULL, ?)')
                         .bind(variantId, line, now3).run();
                     if (ins.success) imported++;
+                }
+                // [修复] 上游拉回卡密后必须回写本地库存并推高变更时间，
+                //        否则本地 stock 一直是 0，且下游 updated_after 增量同步看不到新货。
+                if (imported > 0) {
+                    await db.prepare("UPDATE variants SET stock = (SELECT COUNT(*) FROM cards WHERE variant_id=? AND status=0), updated_at=? WHERE id = ?")
+                        .bind(variantId, now3, variantId).run();
+                    await touchProductsByVariant(db, variantId);
                 }
                 await db.prepare('UPDATE upstream_items SET stock=?, updated_at=? WHERE id=?')
                     .bind(parseInt(map.stock) || 0, now3, map.id).run();
