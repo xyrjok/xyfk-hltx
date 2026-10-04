@@ -4054,7 +4054,9 @@ async function handleApi(request, env, url, ctx) {
                     /^172\.(1[6-9]|2\d|3[01])\./.test(upstreamHost) || /^169\.254\./.test(upstreamHost) || upstreamHost === '::1' || upstreamHost === '0.0.0.0') {
                     return errRes('上游地址不能是内网/回环地址：' + upstreamHost);
                 }
-                const proto = ['dujiao-next', 'acg-faka', 'open-v1'].includes(protocol) ? protocol : 'open-v1';
+                // [v3++] 默认 dujiao-next（采购方客户端唯一支持的协议）；显式传值仍按传值，
+                //       避免不传 protocol 被默认成 open-v1 导致 sync/purchase 被拒的坑
+                const proto = ['dujiao-next', 'acg-faka', 'open-v1'].includes(protocol) ? protocol : 'dujiao-next';
                 const now = time();
                 if (id) {
                     await db.prepare('UPDATE upstream_connections SET name=?, base_url=?, protocol=?, api_key=?, api_secret=?, enabled=?, updated_at=? WHERE id=?')
@@ -4076,6 +4078,21 @@ async function handleApi(request, env, url, ctx) {
                 if (!id) return errRes('缺少连接 ID');
                 await db.prepare('DELETE FROM upstream_connections WHERE id=?').bind(id).run();
                 return jsonRes({ success: true });
+            }
+
+            // GET /api/admin/upstream/mapping/list?connection_id=&page=&page_size=
+            //   查看上游 SKU ↔ 本地规格映射（sync 建立、purchase 按此补货）
+            if (path === '/api/admin/upstream/mapping/list') {
+                await ensureUpstreamConnTable(db);
+                const cid = parseInt(url.searchParams.get('connection_id') || '0') || 0;
+                const mPage = Math.max(1, parseInt(url.searchParams.get('page') || '1') || 1);
+                const mSize = Math.min(200, Math.max(1, parseInt(url.searchParams.get('page_size') || '50') || 50));
+                const mWhere = cid ? 'WHERE connection_id=?' : '';
+                const mBinds = cid ? [cid] : [];
+                const mTotal = (await db.prepare(`SELECT COUNT(*) as c FROM upstream_items ${mWhere}`).bind(...mBinds).first() || {}).c || 0;
+                const mRows = (await db.prepare(`SELECT * FROM upstream_items ${mWhere} ORDER BY id DESC LIMIT ? OFFSET ?`)
+                    .bind(...mBinds, mSize, (mPage - 1) * mSize).all()).results || [];
+                return jsonRes({ total: mTotal, page: mPage, page_size: mSize, items: mRows });
             }
 
             // ==================== [v3+] 采购方适配器：sync 拉货 + purchase 自动补货 ====================

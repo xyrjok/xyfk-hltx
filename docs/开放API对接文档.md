@@ -2,6 +2,8 @@
 
 本项目同时作为**上游供货商**对外供货，兼容三种协议。所有商品需在「商品管理」里勾选
 **「开放 API 销售」**（`products.api_enabled=1`）才会对外可见可购。
+另内置**采购方适配器**（dujiao-next 协议），可直接把另一个本站（或 dujiao-next）当上游做代销/补货，
+即「本项目对接本项目」开箱即用 —— 详见第八章。
 
 ---
 
@@ -236,3 +238,127 @@ interface Ship { delivery(): string; stock(): int|string; hasEnoughStock(int $qu
 - 余额扣减：条件 `UPDATE ... WHERE balance >= ?` + `meta.changes` 判定
 - `cards.api_ref_id` 记录出货的 API 凭证，便于溯源追责
 - **卡密一旦发出即不可回收**，API 出货默认不做自动退款
+
+---
+
+## 八、本项目 ↔ 本项目（上游代销 / 一键补货）
+
+本站同时内置「供货商」与「采购方」两侧能力：**A 站直接把 B 站当上游**即可代销、一键补货，
+无需任何第三方系统。采购方走的就是**第二章的 dujiao-next 协议**（`/api/v1/upstream/*`），
+而本站的供货商侧原生实现了该协议 —— 所以本项目对接本项目是开箱即用的。
+
+```
+┌─────────────┐   /api/v1/upstream/*（dujiao-next 协议）   ┌─────────────┐
+│  B 站（上游）  │◄───────────────────────────────────────│  A 站（下游）  │
+│  供货商角色    │   ping / products / orders / orders/{id}  │  采购方角色    │
+└─────────────┘                                        └─────────────┘
+   B 站会员 API Key = 供货凭据；该会员余额 = 采购资金池
+```
+
+> 采购方客户端目前只支持 `dujiao-next` 协议；`open-v1` / `acg-faka` 协议连接请手动维护。
+> 站与站之间也可混合：任意一侧换成 dujiao-next 实例同样适用。
+
+### 8.1 上游站（B 站）准备
+
+1. **建一个专用会员**（后台 → 会员管理）：建议单独开「代销商」会员，额度与审计互相隔离
+2. **生成 API Key**（后台 → 会员管理 → 该会员 → 生成 API Key）：
+   `api_key` / `api_secret` 只在生成时显示一次，立即保存
+   - 状态必须 `approved` 且「启用」，否则报 `invalid_api_key`
+   - **计价口径建议选 `fixed_member`（固定会员价）**：下游拿货价与数量无关，成本核算恒等
+   - `scopes` 留空，或至少含 `catalog:read` + `order:read` + `order:write`
+3. **给该会员充值余额**：采购扣的就是这个余额，不足时报 `payment_failed`
+4. **商品勾选「开放 API 销售」**（`api_enabled=1`）：不勾的商品对下游完全不可见、不可购
+5. （可选）限流/回调白名单按需配置；本流程不用回调，无需动
+
+### 8.2 下游站（A 站）接入（四步）
+
+管理 API 统一鉴权：请求头 `Authorization: Bearer <ADMIN_TOKEN>`（环境变量），JSON 请求体。
+
+**第 1 步：创建上游连接**
+
+```bash
+curl -X POST https://a.example.com/api/admin/upstream/connection/save \\
+  -H "Authorization: Bearer ***" -H 'Content-Type: application/json' \\
+  -d '{
+    "name": "B站代销",
+    "base_url": "https://b.example.com",
+    "protocol": "dujiao-next",
+    "api_key": "<B站会员的 api_key>",
+    "api_secret": "<B站会员的 api_secret>"
+  }'
+```
+
+- `protocol` 可省略（默认 `dujiao-next`）；更新已有连接传 `id`
+- ⚠️ **自环防护**：把本站自己的地址配成上游会被直接拒绝（防无限递归下单）；
+  内网/回环地址同样拒绝（SSRF 防护）。A→B→A 的环路由链式深度守卫兜底
+  （出站带 `X-XYFK-Chain-Depth`，≥ 3 拒单）
+- 其他管理接口：`connection/list`（列表）、`connection/delete`（删除）
+
+**第 2 步：同步商品（sync）**
+
+```bash
+curl -X POST https://a.example.com/api/admin/upstream/sync \\
+  -H "Authorization: Bearer ***" -H 'Content-Type: application/json' \\
+  -d '{"connection_id": 1}'        # 不传 connection_id 则同步全部启用的连接
+```
+
+返回逐连接汇总：`{connection_id, name, ping_ok, products, skus, created, updated, error}`。
+
+行为说明：
+
+- 先 `ping` 验证凭据，再逐页拉 `/api/v1/upstream/products`（单次上限 20 页 × 100 条）
+- **新上游 SKU**：自动建本地商品 + 规格并登记 `upstream_items` 映射；
+  商品默认 `api_enabled=0`（不对本地下游客开放），等你调完价再开卖
+- **已存在的映射**：只刷新名称/拿货价/库存快照，**不会动你手动调过的本地售价**
+- ⚠️ **新建规格的售价 = 你的拿货价**（上游 `price_amount` = 对方会员实付价）——
+  **请到「商品管理」加价后再开售**，否则零利润代销
+
+**第 3 步：查看映射（可选）**
+
+```bash
+curl "https://a.example.com/api/admin/upstream/mapping/list?connection_id=1&page=1&page_size=50" \\
+  -H "Authorization: Bearer ***"
+```
+
+返回 `{total, page, page_size, items:[{id, connection_id, upstream_product_id, upstream_sku_id,
+local_product_id, local_variant_id, name, price, stock, ...}]}`，采购按 `local_variant_id` 定位。
+
+**第 4 步：补货（purchase）—— 把上游卡密买进本地库存**
+
+```bash
+curl -X POST https://a.example.com/api/admin/upstream/purchase \\
+  -H "Authorization: Bearer ***" -H 'Content-Type: application/json' \\
+  -d '{"connection_id": 1, "variant_id": 123, "qty": 10}'
+```
+
+- 流程：向上游下单（自动带 `downstream_order_no` 幂等，防重复采购）→ 查单取卡密 →
+  逐条入本地卡密库（未售状态）→ 回写规格库存并推高变更时间（下游增量同步可见新货）
+- 数量 1–500/次；**卡密不可回收，入货后不支持自动退货**（同第七章红线）
+- 返回 `{upstream_order_no, upstream_status, requested, imported, note}`；
+  `imported=0` 说明上游没回卡密内容（如手动发货商品），请到上游查单确认
+
+之后就是正常售卖：本地买家下单 → 自动发卡，库存不足再 `purchase` 补货。
+也可以把 `purchase` 接进自己的监控脚本做**低库存自动补货**
+（判断依据：`mapping/list` 的库存快照 + 本地未售卡数）。
+
+### 8.3 价格与成本口径（务必理解）
+
+| 概念 | 口径 |
+|---|---|
+| 上游报价 `price_amount` | 下游 API key 的**实付单价**（含会员折扣；`fixed_member` 下与数量无关） |
+| 同步进本地的规格 `price` | = 拿货价（**不是**零售价，请手动加价） |
+| `upstream_items.price` | 拿货快照（对账用） |
+| 采购扣款 | 扣**上游会员余额**，金额 = 实付价 × 数量 |
+
+### 8.4 常见问题
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| ping 报 `invalid_api_key` | 上游 key 未 approved / 未启用 / 抄错 |
+| ping 报 `user_disabled` | 上游会员被冻结，去上游解冻 |
+| sync 报「采购方客户端目前只支持 dujiao-next 协议」 | 连接 protocol 不对；重新 save 时显式传 `"protocol": "dujiao-next"` |
+| 下单报 `payment_failed` | 上游会员余额不足，去上游充值 |
+| 下单报 `sku_unavailable` | 上游无货 / 商品未勾「开放 API 销售」/ 规格下架 |
+| purchase 报「该本地规格未绑定上游 SKU」 | 该规格不是 sync 建的，先执行 sync |
+| 报「不能把本站地址配成上游」 | 自环防护拦截（A 站不能拿 A 站当上游） |
+| 报 `chain depth exceeded` | 形成 A→B→A 采购环，链式深度守卫（≥ 3）拦截 |
