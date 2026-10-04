@@ -1434,6 +1434,48 @@ const acgSign = (data, appKey) => {
 const acgOk = (data, msg) => jsonRes({ code: 200, msg: msg || 'success', data: data || {} });
 const acgErr = (msg, code) => jsonRes({ code: code || 400, msg: String(msg || 'error'), data: null });
 
+// acg-faka 商品「种类」(race) key：必须 INI 语法安全。
+// acg-faka 的 Ini::toArray 是自研解析器：按行拆、[结尾...]$ 当节点、按第一个 = 拆键值、
+// 键里的 . 表嵌套、值里再出现 = 直接抛异常。故 . = [ ] 换行全部替换掉。
+const acgRaceBaseKey = (v) => {
+    const s = String(v.name || '').replace(/[.=\[\]\r\n]/g, '_').trim();
+    return s || ('v' + v.id);
+};
+// 规格列表 → Map(variantId → raceKey)；重名时后者加 _id 后缀，保证唯一且双方可复算
+const acgRaceKeyMap = (vars) => {
+    const map = new Map();
+    const used = new Set();
+    for (const v of (vars || [])) {
+        let k = acgRaceBaseKey(v);
+        if (used.has(k)) k = k + '_' + v.id;
+        used.add(k);
+        map.set(v.id, k);
+    }
+    return map;
+};
+// race → 规格：空 = 第一个；兼容 raceKey / 原始名称 / 规格 id 三种写法
+const acgRacePick = (vars, keyMap, race) => {
+    const list = vars || [];
+    const r = String(race || '').trim();
+    if (!r) return list[0] || null;
+    return list.find(v => keyMap.get(v.id) === r)
+        || list.find(v => String(v.name || '') === r)
+        || list.find(v => String(v.id) === r)
+        || null;
+};
+// config INI 文本（对齐 acg-faka Ini::toConfig 输出格式：[section] + key=value，无引号）
+// entries: [{key, id, listPrice, unitPrice}]；单规格商品不出 config（走 factory_price 口径）
+const acgBuildConfigIni = (entries) => {
+    if (!entries || entries.length <= 1) return '';
+    const cat = [], map = [], fac = [];
+    for (const e of entries) {
+        cat.push(e.key + '=' + e.listPrice);
+        map.push(e.key + '=' + e.id);
+        fac.push(e.key + '=' + e.unitPrice);
+    }
+    return '[category]\n' + cat.join('\n') + '\n[shared_mapping]\n' + map.join('\n') + '\n[category_factory]\n' + fac.join('\n');
+};
+
 // 解析 x-www-form-urlencoded（保留原始字符串值，与 PHP $_POST 一致）
 async function parseFormBody(request) {
     let text = '';
@@ -1834,11 +1876,24 @@ async function handleApi(request, env, url, ctx) {
         // ===========================
         // --- [v3] acg-faka 对接店铺协议 /shared/* ---
         // ===========================
+        // 契约按 acg-faka 3.1.2 源码逐项对齐（服务器端 app/Controller/Shared/Commodity.php
+        // + 客户端 app/Service/Bind/Shared.php + 字段白名单 app/Util/SharedPayload.php）：
+        //   - 商品行 = COMMODITY_FIELDS（name/description/cover/price/user_price/config/stock/...）
+        //   - 列表 = 分类树 [{id,name,sort,icon,status,pid,children:[商品行]}]（CATEGORY_FIELDS）
+        //   - config = INI 文本（category=挂牌价 / shared_mapping=规格id / category_factory=拿货价）
+        //   - delivery_way：0=卡密库存(自动发卡)，1=人工
+        //   - trade / query 的 data.secret = 卡密文本（下游直接当发货内容，最关键字段）
+        //   - 失败 = code != 200（acg-faka 抛 JSONException 时 code=0，客户端只看是否 200）
+        //   - HTTP 恒 200：客户端 postOptional 把 404/405 当「老版本上游」，绝不能回这两个状态码
         if (path.startsWith('/shared/')) {
             const form = await parseFormBody(request);
             const aa = await acgAuth(request, db, form);
             if (!aa.ok) { await logApiCall(db, null, request, 200, 'acg_auth_failed'); return acgErr(aa.msg); }
             const aUid = aa.user.id;
+            // 会员折扣每请求解析一次（报价共用，避免逐 SKU 查库）
+            const acgDiscount = await resolveMemberDiscount(db, aa.user.member_level);
+
+            // 库存口径（自动发货=未售卡密数；手动发货=variants.stock）
             const acgStockOf = async (variant) => {
                 if (variant.auto_delivery === 1) {
                     const r = await db.prepare('SELECT COUNT(*) as c FROM cards WHERE variant_id=? AND status=0').bind(variant.id).first();
@@ -1847,10 +1902,74 @@ async function handleApi(request, env, url, ctx) {
                 return parseInt(variant.stock) || 0;
             };
             // acg-faka 用 code 标识商品；这里用商品 id 的字符串形式
-            const findGoods = async (code) => {
+            const acgFindGoods = async (code) => {
                 const pid = parseInt(code);
                 if (!pid) return null;
                 return await db.prepare('SELECT * FROM products WHERE id=? AND api_enabled=1 AND active=1').bind(pid).first() || null;
+            };
+            const acgVarsOf = async (p) =>
+                (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC').bind(p.id).all()).results || [];
+            // 拿货价（按调用方会员身份计价）
+            const acgUnit = async (v, p, num) =>
+                (await apiUnitPrice(db, aa, v, { member_price_enabled: p.member_price_enabled }, num || 1, acgDiscount));
+
+            // 计价 + config 一次性算好：多规格出 category/shared_mapping/category_factory 三段，
+            // 单规格不出 config（成本走 factory_price 口径，与 acg-faka 语义一致）
+            const acgConfigAndPrice = async (p, vars) => {
+                const keyMap = acgRaceKeyMap(vars);
+                const units = [];
+                for (const v of vars) units.push(await acgUnit(v, p, 1));
+                const lists = vars.map(v => parseFloat(v.price) || 0);
+                const entries = vars.map((v, i) => ({
+                    key: keyMap.get(v.id),
+                    id: v.id,
+                    listPrice: (parseFloat(v.price) || 0).toFixed(2),
+                    unitPrice: (units[i] || 0).toFixed(2)
+                }));
+                return {
+                    keyMap,
+                    ini: acgBuildConfigIni(entries),
+                    isCategory: vars.length > 1,
+                    // 多规格：factory_price=0，逐规格成本在 config.category_factory（与 acg-faka 同口径）
+                    factory: vars.length > 1 ? 0 : (units[0] || 0),
+                    listMin: vars.length ? Math.min(...lists) : 0,
+                    unitMin: vars.length ? Math.min(...units) : 0
+                };
+            };
+            // 商品行（COMMODITY_FIELDS 白名单口径）
+            const acgRow = async (p, vars, info) => {
+                let stock = 0;
+                for (const v of vars) stock += await acgStockOf(v);
+                return {
+                    id: p.id,
+                    category_id: p.category_id || 0,
+                    name: p.name,
+                    description: (p.description || '').replace(/<[^>]+>/g, ''),
+                    cover: p.image_url || '',
+                    price: info.listMin.toFixed(2),
+                    user_price: info.unitMin.toFixed(2),
+                    status: 1,
+                    code: String(p.id),
+                    sort: p.sort || 0,
+                    delivery_way: (vars[0] && vars[0].auto_delivery === 1) ? 0 : 1,
+                    contact_type: 0,
+                    password_status: 0,
+                    coupon: '',
+                    seckill_status: 0,
+                    seckill_start_time: '',
+                    seckill_end_time: '',
+                    draft_status: 1,
+                    draft_premium: 0,
+                    inventory_hidden: 0,
+                    only_user: 0,
+                    purchase_count: 0,
+                    widget: '[]',
+                    minimum: 0,
+                    maximum: 0,
+                    config: info.ini,
+                    stock,
+                    tags: p.tags || ''
+                };
             };
 
             // ---- 1. 连接测试 ----
@@ -1860,145 +1979,187 @@ async function handleApi(request, env, url, ctx) {
                 return acgOk({ shopName: (s && s.value) || 'xyfk', balance: (parseFloat(aa.user.balance) || 0).toFixed(2) });
             }
 
-            // ---- 2. 商品列表 ----
+            // ---- 2. 商品列表（分类树）----
             if (path === '/shared/commodity/items') {
                 const rows = (await db.prepare('SELECT * FROM products WHERE api_enabled=1 AND active=1 ORDER BY sort DESC, id ASC').all()).results || [];
-                const data = [];
+                const groups = new Map();
                 for (const p of rows) {
-                    const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC').bind(p.id).all()).results || [];
-                    const skus = [];
-                    for (const v of vars) {
-                        skus.push({
-                            id: v.id, sku: v.name, name: v.name,
-                            price: (parseFloat(v.price) || 0).toFixed(2),
-                            stock: await acgStockOf(v)
-                        });
-                    }
+                    const vars = await acgVarsOf(p);
+                    if (!vars.length) continue;
+                    const info = await acgConfigAndPrice(p, vars);
+                    const cid = p.category_id || 0;
+                    if (!groups.has(cid)) groups.set(cid, []);
+                    groups.get(cid).push(await acgRow(p, vars, info));
+                }
+                const data = [];
+                for (const [cid, children] of groups) {
+                    const c = cid ? await db.prepare('SELECT * FROM categories WHERE id=?').bind(cid).first() : null;
                     data.push({
-                        code: String(p.id), name: p.name,
-                        introduce: (p.description || '').replace(/<[^>]+>/g, '').substring(0, 300),
-                        picture: p.image_url || '', category: String(p.category_id || 1),
-                        price: skus.length ? skus[0].price : '0.00', skus
+                        id: cid,
+                        name: (c && c.name) || '未分类',
+                        sort: (c && c.sort) || 0,
+                        icon: (c && c.image_url) || '',
+                        status: 1,
+                        pid: 0,
+                        children
                     });
                 }
                 await logApiCall(db, aa, request, 200);
                 return acgOk(data);
             }
 
-            // ---- 3. 商品详情 ----
+            // ---- 3. 商品详情（单商品对象；客户端以 name/price 字段识别「新协议」）----
             if (path === '/shared/commodity/item') {
-                const p = await findGoods(form.code);
-                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('该商品暂未上架'); }
-                const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC').bind(p.id).all()).results || [];
-                const skus = [];
-                for (const v of vars) skus.push({ id: v.id, sku: v.name, name: v.name, price: (parseFloat(v.price) || 0).toFixed(2), stock: await acgStockOf(v) });
+                const p = await acgFindGoods(form.code || form.sharedCode);
+                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('商品不存在'); }
+                const vars = await acgVarsOf(p);
+                const info = await acgConfigAndPrice(p, vars);
+                const row = await acgRow(p, vars, info);
+                row.factory_price = info.factory.toFixed(2);
+                await logApiCall(db, aa, request, 200);
+                return acgOk(row);
+            }
+
+            // ---- 4. 库存 + 拿货价快照 ----
+            if (path === '/shared/commodity/inventory') {
+                const p = await acgFindGoods(form.sharedCode || form.code);
+                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('商品不存在'); }
+                const vars = await acgVarsOf(p);
+                const info = await acgConfigAndPrice(p, vars);
+                const v = acgRacePick(vars, info.keyMap, form.race);
+                let count = 0;
+                if (v) count = await acgStockOf(v);
+                else for (const x of vars) count += await acgStockOf(x);
                 await logApiCall(db, aa, request, 200);
                 return acgOk({
-                    code: String(p.id), name: p.name,
-                    introduce: (p.description || '').replace(/<[^>]+>/g, ''),
-                    picture: p.image_url || '', category: String(p.category_id || 1),
-                    price: skus.length ? skus[0].price : '0.00',
-                    factory_price: skus.length ? skus[0].price : '0.00',
-                    delivery_way: (vars[0] && vars[0].auto_delivery === 1) ? 1 : 2,
-                    draft_status: 1, is_category: 0, skus
+                    count,
+                    delivery_way: (vars[0] && vars[0].auto_delivery === 1) ? 0 : 1,
+                    draft_status: 1,
+                    price: info.listMin.toFixed(2),
+                    user_price: info.unitMin.toFixed(2),
+                    config: info.ini,
+                    factory_price: info.factory.toFixed(2),
+                    is_category: info.isCategory
                 });
             }
 
-            // ---- 4/5. 库存 ----
-            if (path === '/shared/commodity/inventory' || path === '/shared/commodity/stock') {
-                const p = await findGoods(form.sharedCode || form.code);
-                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('该商品暂未上架'); }
-                const vars = (await db.prepare(`SELECT * FROM variants WHERE product_id=? AND active=1 ${form.sku ? 'AND id=?' : ''}`).bind(...(form.sku ? [p.id, form.sku] : [p.id])).all()).results || [];
-                let total = 0;
-                for (const v of vars) total += await acgStockOf(v);
-                await logApiCall(db, aa, request, 200);
-                return acgOk({ code: String(p.id), stock: total });
-            }
-
-            // ---- 11. 库存状态（预选）----
+            // ---- 5. 库存状态（下单前检查）：足=200，不足=code!=200 报错 ----
             if (path === '/shared/commodity/inventoryState') {
-                const p = await findGoods(form.shared_code);
-                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('该商品暂未上架'); }
+                const p = await acgFindGoods(form.shared_code || form.code);
+                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('商品不存在'); }
+                const vars = await acgVarsOf(p);
                 const num = parseInt(form.num) || 1;
                 const cardId = parseInt(form.card_id) || 0;
                 if (cardId) {
-                    const c = await db.prepare('SELECT id FROM cards WHERE id=? AND status=0').bind(cardId).first();
-                    await logApiCall(db, aa, request, 200);
-                    return acgOk({ status: c ? 1 : 0 });
+                    const c = await db.prepare('SELECT id FROM cards WHERE id=? AND status=0 AND variant_id IN (SELECT id FROM variants WHERE product_id=?)')
+                        .bind(cardId, p.id).first();
+                    await logApiCall(db, aa, request, 200, c ? '' : 'acg_card_taken');
+                    if (!c) return acgErr('该卡已被他人抢走啦');
+                    return acgOk({});
                 }
-                const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1').bind(p.id).all()).results || [];
-                let total = 0;
-                for (const v of vars) total += await acgStockOf(v);
+                const v = acgRacePick(vars, acgRaceKeyMap(vars), form.race);
+                const stock = v ? await acgStockOf(v) : 0;
                 await logApiCall(db, aa, request, 200);
-                return acgOk({ status: total >= num ? 1 : 0, stock: total });
-            }
-
-            // ---- 6. 定价 ----
-            if (path === '/shared/commodity/valuation') {
-                const p = await findGoods(form.code);
-                if (!p) return acgErr('该商品暂未上架');
-                const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1').bind(p.id).all()).results || [];
-                const out = [];
-                for (const v of vars) {
-                    out.push({ id: v.id, sku: v.name, price: (await apiUnitPrice(db, aa, v, p, parseInt(form.num) || 1)).toFixed(2) });
-                }
-                await logApiCall(db, aa, request, 200);
-                return acgOk(out);
-            }
-
-            // ---- 7. 下单 ----
-            if (path === '/shared/commodity/trade') {
-                const p = await findGoods(form.shared_code);
-                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('该商品暂未上架'); }
-                const vid = parseInt(form.sku) || 0;
-                const v = vid
-                    ? await db.prepare('SELECT * FROM variants WHERE id=? AND product_id=? AND active=1').bind(vid, p.id).first()
-                    : await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC LIMIT 1').bind(p.id).first();
-                if (!v) return acgErr('该商品暂未上架');
-                const num = Math.max(1, parseInt(form.num) || 1);
-                const stock = await acgStockOf(v);
                 if (stock < num) return acgErr('库存不足');
-                const unit = await apiUnitPrice(db, aa, v, p, num);
-                const total = Math.round(unit * num * 100) / 100;
+                return acgOk({});
+            }
+
+            // ---- 6. 下单（data.secret = 卡密文本）----
+            if (path === '/shared/commodity/trade') {
+                const p = await acgFindGoods(form.shared_code || form.code);
+                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('商品不存在'); }
+                const num = Math.max(1, Math.min(200, parseInt(form.num) || 1));
+                const cardId = parseInt(form.card_id) || 0;
+                const qty = cardId ? 1 : num; // 预选单卡时数量强制 1（与 acg-faka 一致）
+                const requestNo = (form.request_no || '').toString().trim().substring(0, 64) || null;
+                // 幂等：同一凭证 + 同一 request_no 回放已有订单（含 secret，不重复扣款）
+                if (requestNo) {
+                    const oldRef = await db.prepare('SELECT * FROM api_order_refs WHERE credential_id=? AND downstream_order_no=?').bind(aa.cred.id, requestNo).first();
+                    if (oldRef) {
+                        const old = await db.prepare('SELECT * FROM orders WHERE id=?').bind(oldRef.order_id).first();
+                        if (old) {
+                            const cr = (await db.prepare('SELECT content FROM cards WHERE order_id=? ORDER BY id ASC').bind(oldRef.order_id).all()).results || [];
+                            await logApiCall(db, aa, request, 200, 'idempotent_hit');
+                            return acgOk({ secret: cr.map(c => stripCardNote(c.content)).join('\n'), trade_no: old.id, amount: parseFloat(old.total_amount || 0).toFixed(2) });
+                        }
+                    }
+                }
+                const vars = await acgVarsOf(p);
+                const v = acgRacePick(vars, acgRaceKeyMap(vars), form.race);
+                if (!v) return acgErr('商品不存在');
+                const stock = await acgStockOf(v);
+                if (stock < qty) return acgErr('库存不足');
+                const unit = await apiUnitPrice(db, aa, v, { member_price_enabled: p.member_price_enabled }, qty, acgDiscount);
+                const total = Math.round(unit * qty * 100) / 100;
                 if ((parseFloat(aa.user.balance) || 0) < total) return acgErr('余额不足');
                 const orderId = uuid();
                 const now = time();
+                // 抢卡密（自动发货）：预选走指定卡，否则按数量抢
                 let cards = [];
                 if (v.auto_delivery === 1) {
-                    const cands = (await db.prepare('SELECT id FROM cards WHERE variant_id=? AND status=0 ORDER BY id ASC LIMIT ?').bind(v.id, num).all()).results || [];
-                    if (cands.length < num) return acgErr('库存不足');
-                    const ids = cands.map(c => c.id);
-                    const ph = ids.map(() => '?').join(',');
-                    await db.prepare(`UPDATE cards SET status=1, order_id=? WHERE id IN (${ph}) AND status=0`).bind(orderId, ...ids).run();
-                    cards = (await db.prepare('SELECT id, content FROM cards WHERE order_id=? AND variant_id=? ORDER BY id ASC').bind(orderId, v.id).all()).results || [];
-                    if (cards.length < num) {
-                        await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(orderId).run();
-                        return acgErr('库存竞争失败，请重试');
+                    if (cardId) {
+                        const upd = await db.prepare('UPDATE cards SET status=1, order_id=? WHERE id=? AND status=0 AND variant_id=?').bind(orderId, cardId, v.id).run();
+                        if (!upd.success || upd.meta.changes !== 1) return acgErr('该卡已被他人抢走啦');
+                        cards = (await db.prepare('SELECT id, content FROM cards WHERE id=? AND order_id=?').bind(cardId, orderId).all()).results || [];
+                    } else {
+                        const cands = (await db.prepare('SELECT id FROM cards WHERE variant_id=? AND status=0 ORDER BY id ASC LIMIT ?').bind(v.id, qty).all()).results || [];
+                        if (cands.length < qty) return acgErr('库存不足');
+                        const ids = cands.map(c => c.id);
+                        const ph = ids.map(() => '?').join(',');
+                        await db.prepare(`UPDATE cards SET status=1, order_id=? WHERE id IN (${ph}) AND status=0`).bind(orderId, ...ids).run();
+                        cards = (await db.prepare('SELECT id, content FROM cards WHERE order_id=? AND variant_id=? ORDER BY id ASC').bind(orderId, v.id).all()).results || [];
+                        if (cards.length < qty) {
+                            await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=? AND variant_id=?').bind(orderId, v.id).run();
+                            return acgErr('库存竞争失败，请重试');
+                        }
                     }
                 }
+                // 扣余额（条件 UPDATE 原子扣款）
                 const dec = await db.prepare('UPDATE users SET balance = balance - ?, updated_at=? WHERE id=? AND balance >= ?').bind(total, now, aUid, total).run();
                 if (!dec.success || dec.meta.changes !== 1) {
                     if (cards.length) await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(orderId).run();
                     return acgErr('余额不足');
                 }
                 await db.prepare('INSERT INTO orders (id, trade_no, variant_id, product_name, variant_name, price, quantity, total_amount, contact, query_password, payment_method, created_at, status, cards_sent, user_id, order_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-                    .bind(orderId, form.trade_no || null, v.id, p.name, v.name, unit, num, total.toFixed(2),
-                        aa.user.email || aa.user.username, 'api_' + aa.cred.id, 'balance', now, 1,
+                    .bind(orderId, requestNo, v.id, p.name, v.name, unit, qty, total.toFixed(2),
+                        (form.contact || aa.user.email || aa.user.username || '').toString().substring(0, 100),
+                        'api_' + aa.cred.id, 'balance', now, 1,
                         cards.length ? JSON.stringify(cards.map(c => ({ id: c.id, content: c.content }))) : null, aUid, 'api').run();
                 await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-                    .bind(aUid, -total, 'api_purchase', 'acg 采购 ' + p.name + ' x' + num, orderId, now).run();
-                const refIns = await db.prepare('INSERT INTO api_order_refs (credential_id, order_id, downstream_order_no, callback_status, created_at) VALUES (?, ?, ?, ?, ?)')
-                    .bind(aa.cred.id, orderId, (form.trade_no || '').toString().substring(0, 64) || null, 'none', now).run();
+                    .bind(aUid, -total, 'api_purchase', 'acg 采购 ' + p.name + ' x' + qty, orderId, now).run();
+                await db.prepare('INSERT INTO api_order_refs (credential_id, order_id, downstream_order_no, callback_status, created_at) VALUES (?, ?, ?, ?, ?)')
+                    .bind(aa.cred.id, orderId, requestNo, 'none', now).run();
                 await logApiCall(db, aa, request, 200);
-                return acgOk({ trade_no: orderId, id: refIns.meta.last_row_id, amount: total.toFixed(2) });
+                return acgOk({ secret: cards.map(c => stripCardNote(c.content)).join('\n'), trade_no: orderId, amount: total.toFixed(2) });
             }
 
-            // ---- 8/12. 拉卡密 / 草稿 ----
-            if (path === '/shared/commodity/draftCard' || path === '/shared/commodity/draft') {
-                const p = await findGoods(form.code);
-                if (!p) return acgErr('该商品暂未上架');
+            // ---- 7. 查单（data = {secret, widget, status}）----
+            const qMatch = path.match(/^\/shared\/commodity\/query\/(.+)$/);
+            if (qMatch) {
+                const tradeNo = decodeURIComponent(qMatch[1]);
+                const ref = await db.prepare('SELECT * FROM api_order_refs WHERE downstream_order_no=? AND credential_id=?').bind(tradeNo, aa.cred.id).first()
+                    || await db.prepare('SELECT * FROM api_order_refs WHERE order_id=? AND credential_id=?').bind(tradeNo, aa.cred.id).first();
+                if (!ref) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('订单不存在'); }
+                const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(ref.order_id).first();
+                if (!o) return acgErr('订单不存在');
+                const cr = (await db.prepare('SELECT content FROM cards WHERE order_id=? ORDER BY id ASC').bind(ref.order_id).all()).results || [];
+                await logApiCall(db, aa, request, 200);
+                return acgOk({
+                    secret: cr.map(c => stripCardNote(c.content)).join('\n'),
+                    widget: null,
+                    status: o.status === 1 ? 1 : (o.status === 0 ? 0 : 2)
+                });
+            }
+
+            // ---- 8. 预选卡列表（{list:[{id,draft,draft_premium}], total}，3.1.2 形状）----
+            if (path === '/shared/commodity/draftCard') {
+                const p = await acgFindGoods(form.code || form.sharedCode);
+                if (!p) return acgErr('商品不存在');
                 const limit = Math.min(100, Math.max(1, parseInt(form.limit) || 10));
-                const rows = (await db.prepare('SELECT id, content FROM cards WHERE variant_id IN (SELECT id FROM variants WHERE product_id=?) AND status=0 ORDER BY id ASC LIMIT ?').bind(p.id, limit).all()).results || [];
+                const vars = await acgVarsOf(p);
+                const v = acgRacePick(vars, acgRaceKeyMap(vars), form.race);
+                const rows = (await db.prepare(`SELECT id, content FROM cards WHERE status=0 AND variant_id IN (SELECT id FROM variants WHERE product_id=?) ${v ? 'AND variant_id=?' : ''} ORDER BY id ASC LIMIT ?`)
+                    .bind(...(v ? [p.id, v.id, limit] : [p.id, limit])).all()).results || [];
                 await logApiCall(db, aa, request, 200);
                 return acgOk({
                     total: rows.length,
@@ -2010,389 +2171,50 @@ async function handleApi(request, env, url, ctx) {
                 });
             }
 
-            // ---- 9. 查单 ----
-            const qMatch = path.match(/^\/shared\/commodity\/query\/(.+)$/);
-            if (qMatch) {
-                const tradeNo = decodeURIComponent(qMatch[1]);
-                const ref = await db.prepare('SELECT * FROM api_order_refs WHERE downstream_order_no=? AND credential_id=?').bind(tradeNo, aa.cred.id).first()
-                    || await db.prepare('SELECT * FROM api_order_refs WHERE order_id=? AND credential_id=?').bind(tradeNo, aa.cred.id).first();
-                if (!ref) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('订单不存在'); }
-                const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(ref.order_id).first();
-                if (!o) return acgErr('订单不存在');
-                let list = [];
-                try {
-                    const cr = (await db.prepare('SELECT id, content FROM cards WHERE order_id=? ORDER BY id ASC').bind(ref.order_id).all()).results || [];
-                    list = cr.map(c => ({ id: c.id, content: c.content }));
-                } catch(e) {}
+            // ---- 9. 预选单卡详情（{draft_premium}）----
+            if (path === '/shared/commodity/draft') {
+                const p = await acgFindGoods(form.code || form.sharedCode);
+                if (!p) return acgErr('商品不存在');
+                const cardId = parseInt(form.card_id) || 0;
+                const c = await db.prepare('SELECT id, content FROM cards WHERE id=? AND status=0 AND variant_id IN (SELECT id FROM variants WHERE product_id=?)')
+                    .bind(cardId, p.id).first();
+                if (!c) return acgErr('预选的宝贝不存在');
                 await logApiCall(db, aa, request, 200);
-                return acgOk({ trade_no: o.id, status: o.status === 1 ? 1 : (o.status === 0 ? 0 : -1), amount: parseFloat(o.total_amount).toFixed(2), list });
+                return acgOk({ id: c.id, draft: (c.content.match(/#\[(.*?)\]/) || [, ''])[1], draft_premium: 0 });
             }
 
-            await logApiCall(db, aa, request, 200, 'acg_not_found');
-            return acgErr('接口不存在');
+            // ---- 10. 实时库存（{stock}）----
+            if (path === '/shared/commodity/stock') {
+                const p = await acgFindGoods(form.code || form.sharedCode);
+                if (!p) { await logApiCall(db, aa, request, 200, 'acg_not_found'); return acgErr('商品不存在'); }
+                const vars = await acgVarsOf(p);
+                const v = acgRacePick(vars, acgRaceKeyMap(vars), form.race);
+                let stock = 0;
+                if (v) stock = await acgStockOf(v);
+                else for (const x of vars) stock += await acgStockOf(x);
+                await logApiCall(db, aa, request, 200);
+                return acgOk({ stock });
+            }
+
+            // ---- 11. 定价（{price: 总价, currency_code}）----
+            if (path === '/shared/commodity/valuation') {
+                const p = await acgFindGoods(form.code || form.sharedCode);
+                if (!p) return acgErr('商品不存在#0');
+                const vars = await acgVarsOf(p);
+                const v = acgRacePick(vars, acgRaceKeyMap(vars), form.race);
+                if (!v) return acgErr('商品不存在#0');
+                const num = Math.max(1, parseInt(form.num) || 1);
+                const unit = await apiUnitPrice(db, aa, v, { member_price_enabled: p.member_price_enabled }, num, acgDiscount);
+                await logApiCall(db, aa, request, 200);
+                return acgOk({ price: (Math.round(unit * num * 100) / 100).toFixed(2), currency_code: 'CNY' });
+            }
+
+            await logApiCall(db, aa, request, 200, 'acg_no_route');
+            return acgErr('接口不存在', 404);
         }
 
         // ===========================
-        // --- [v3] dujiao-next 上游供货协议 /api/v1/upstream/* ---
-        // ===========================
-        if (path.startsWith('/api/v1/upstream/')) {
-            const ua = await upstreamAuth(request, env, db);
-            if (!ua.ok) {
-                await logApiCall(db, null, request, ua.status, ua.code);
-                return upErr(ua.status, ua.code, ua.msg);
-            }
-            // [v3+] scopes 权限校验（该 key 未授予所需范围时拒绝）
-            if (!scopeAllows(ua.cred, method, path)) {
-                await logApiCall(db, ua, request, 403, 'insufficient_scope');
-                return upErr(403, 'insufficient_scope', 'api key scope does not allow this operation');
-            }
-            const uid = ua.user.id;
-            const uname = ua.user.username || ua.user.email || ('user_' + uid);
-            // [v3++] 会员折扣每请求只解析一次（upSku 报价与下单计价共用，避免逐 SKU 多一次 D1 查询）
-            const _upDiscount = await resolveMemberDiscount(db, ua.user.member_level);
-
-            // 协议内统一的库存计算
-            const upStockOf = async (variant) => {
-                if (variant.auto_delivery === 1) {
-                    const r = await db.prepare('SELECT COUNT(*) as c FROM cards WHERE variant_id=? AND status=0').bind(variant.id).first();
-                    return r ? (r.c || 0) : 0;
-                }
-                return parseInt(variant.stock) || 0;
-            };
-            const upSku = async (v, p) => {
-                const stock = await upStockOf(v);
-                let wc = null;
-                if (v.wholesale_config) {
-                    try { wc = typeof v.wholesale_config === 'string' ? JSON.parse(v.wholesale_config) : v.wholesale_config; } catch(e) { wc = null; }
-                }
-                // [v3++] 报价语义对齐 dujiao-next 官方供货实现（toUpstreamProductWithMemberPrice）：
-                //        price_amount = 调用方会员实付单价（买 1 件口径，fixed_member 下任意数量同价），
-                //        original_price = 挂牌原价，member_price = 会员折扣价（无折扣不返回）。
-                //        下游按 price_amount 记成本即与实际扣款一致，不再“成本虚高、利润被低估”。
-                const base = parseFloat(v.price) || 0;
-                const priceOn = !p || p.member_price_enabled !== 0;
-                const disc = priceOn ? _upDiscount : 100;
-                const unit = await apiUnitPrice(db, ua, v, { member_price_enabled: p ? p.member_price_enabled : undefined }, 1, _upDiscount);
-                return {
-                    id: v.id,
-                    sku_code: 'v' + v.id,
-                    spec_values: jsonmap(v.name),
-                    price_amount: unit.toFixed(2),
-                    original_price: base.toFixed(2),
-                    member_price: disc < 100 ? (Math.round((base * disc / 100) * 100) / 100).toFixed(2) : undefined,
-                    wholesale_prices: Array.isArray(wc) ? wc.map(r => ({ qty: parseInt(r.qty) || 0, price: (parseFloat(r.price) || 0).toFixed(2) })) : [],
-                    stock_status: stock > 0 ? 'in_stock' : 'out_of_stock',
-                    stock_quantity: stock,
-                    is_active: v.active === 1
-                };
-            };
-            const upProduct = async (p, vars) => {
-                const skus = [];
-                for (const v of vars) skus.push(await upSku(v, p));
-                // 商品级报价 = 最低 SKU 价（口径与 SKU 一致：实付价 / 原价 / 会员价）
-                const minOf = (key) => {
-                    const vals = skus.map(s => parseFloat(s[key])).filter(x => !isNaN(x));
-                    return vals.length ? vals.sort((a, b) => a - b)[0].toFixed(2) : '0.00';
-                };
-                return {
-                    id: p.id,
-                    seo_meta: jsonmap(p.seo_description || ''),
-                    title: jsonmap(p.name),
-                    description: jsonmap((p.description || '').replace(/<[^>]+>/g, '').substring(0, 500)),
-                    content: jsonmap(''),
-                    images: p.image_url ? [p.image_url] : [],
-                    tags: (p.tags || '').split(/[,，\s]+/).filter(Boolean),
-                    price_amount: minOf('price_amount'),
-                    original_price: minOf('original_price'),
-                    member_price: skus.some(s => s.member_price) ? minOf('member_price') : undefined,
-                    currency: 'CNY',
-                    fulfillment_type: (vars[0] && vars[0].auto_delivery === 1) ? 'auto' : 'manual',
-                    manual_form_schema: {},
-                    is_active: p.active === 1 && p.api_enabled === 1,
-                    category_id: p.category_id,
-                    skus,
-                    updated_at: new Date((p.updated_at || p.created_at || 0) * 1000).toISOString()
-                };
-            };
-
-            // ---- POST /api/v1/upstream/ping ----
-            if (path === '/api/v1/upstream/ping' && method === 'POST') {
-                const siteRow = await db.prepare("SELECT value FROM site_config WHERE key='site_name'").first();
-                let memberLevel = null;
-                const lvRow = await db.prepare("SELECT value FROM site_config WHERE key='member_levels'").first();
-                if (lvRow && lvRow.value) {
-                    try {
-                        const levels = JSON.parse(lvRow.value);
-                        const lv = levels && levels[ua.user.member_level || 0];
-                        if (lv) memberLevel = { id: (ua.user.member_level || 0), name: jsonmap(lv.name || ''), slug: 'level_' + (ua.user.member_level || 0), icon: '' };
-                    } catch(e) {}
-                }
-                await logApiCall(db, ua, request, 200);
-                return jsonRes({
-                    ok: true,
-                    site_name: (siteRow && siteRow.value) || 'xyfk',
-                    protocol_version: '1.0',
-                    user_id: uid,
-                    balance: (parseFloat(ua.user.balance) || 0).toFixed(2),
-                    currency: 'CNY',
-                    member_level: memberLevel
-                });
-            }
-
-            // ---- GET /api/v1/upstream/categories ----
-            if (path === '/api/v1/upstream/categories' && method === 'GET') {
-                const rows = (await db.prepare('SELECT * FROM categories ORDER BY sort DESC, id ASC').all()).results || [];
-                await logApiCall(db, ua, request, 200);
-                return jsonRes({ ok: true, categories: rows.map(c => ({
-                    id: c.id, parent_id: 0, slug: 'c' + c.id, name: jsonmap(c.name), icon: c.image_url || '', sort_order: c.sort || 0
-                })) });
-            }
-
-            // ---- GET /api/v1/upstream/products ----
-            const listMatch = path === '/api/v1/upstream/products' && method === 'GET';
-            if (listMatch) {
-                // [v3+] 60s 边缘缓存命中直接返回，不查 D1
-                const _ck = edgeCacheReq(url, ua.cred.api_key);
-                const _hit = await edgeCacheMatch(_ck);
-                if (_hit) { await logApiCall(db, ua, request, 200, 'cache_hit'); return _hit; }
-                const page = Math.max(1, parseInt(url.searchParams.get('page')) || 1);
-                const pageSize = Math.min(100, Math.max(1, parseInt(url.searchParams.get('page_size')) || 20));
-                const includeInactive = url.searchParams.get('include_inactive') === 'true';
-                const updatedAfter = url.searchParams.get('updated_after');
-                let where = 'WHERE api_enabled=1';
-                const binds = [];
-                if (!includeInactive) where += ' AND active=1';
-                if (updatedAfter) {
-                    const ts = Math.floor(new Date(updatedAfter).getTime() / 1000);
-                    if (!isNaN(ts)) {
-                        // [修复] 原条件 `updated_at IS NULL OR ...` 会把所有 updated_at 为 NULL 的历史行
-                        //        无条件当成“已变更”，增量同步永远退化为全量拉取。
-                        //        改为 COALESCE 兑底时间；同时兼容地把「近期变动过的规格」也算进变更集，
-                        //        避免只改规格价/库存时下游拉不到。
-                        where += ` AND (COALESCE(products.updated_at, products.created_at, 0) >= ?
-                                   OR EXISTS (SELECT 1 FROM variants v WHERE v.product_id = products.id
-                                              AND COALESCE(v.updated_at, v.created_at, 0) >= ?))`;
-                        binds.push(ts, ts);
-                    }
-                }
-                const total = (await db.prepare(`SELECT COUNT(*) as c FROM products ${where}`).bind(...binds).first() || {}).c || 0;
-                const rows = (await db.prepare(`SELECT * FROM products ${where} ORDER BY sort DESC, id ASC LIMIT ? OFFSET ?`)
-                    .bind(...binds, pageSize, (page - 1) * pageSize).all()).results || [];
-                const items = [];
-                if (rows.length) {
-                    const ids = rows.map(p => p.id);
-                    const ph = ids.map(() => '?').join(',');
-                    const allVars = (await db.prepare(`SELECT * FROM variants WHERE product_id IN (${ph}) AND active=1 ORDER BY sort DESC, id ASC`).bind(...ids).all()).results || [];
-                    for (const p of rows) items.push(await upProduct(p, allVars.filter(v => v.product_id === p.id)));
-                }
-                await logApiCall(db, ua, request, 200);
-                const _resp = jsonRes({ total, items, includes_inactive: includeInactive });
-                try { ctx.waitUntil(edgeCachePut(_ck, _resp, EDGE_CACHE_TTL_LIST)); } catch (e) {}
-                return _resp;
-            }
-
-            // ---- GET /api/v1/upstream/products/{id} ----
-            const prodMatch = path.match(/^\/api\/v1\/upstream\/products\/(\d+)$/);
-            if (prodMatch && method === 'GET') {
-                const pid = parseInt(prodMatch[1]);
-                const p = await db.prepare('SELECT * FROM products WHERE id=? AND api_enabled=1').bind(pid).first();
-                if (!p) {
-                    await logApiCall(db, ua, request, 404, 'product_deleted');
-                    return upErr(404, 'product_deleted', 'product not found');
-                }
-                const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC').bind(pid).all()).results || [];
-                await logApiCall(db, ua, request, 200);
-                return jsonRes({ ok: true, product: await upProduct(p, vars) });
-            }
-
-            // ---- POST /api/v1/upstream/orders ----
-            if (path === '/api/v1/upstream/orders' && method === 'POST') {
-                // [v3] 递归深度守卫：A→B→A→B 无限循环保护
-                if (chainDepth(request) >= CHAIN_DEPTH_LIMIT) {
-                    await logApiCall(db, ua, request, 400, 'chain_depth_exceeded');
-                    return upErr(400, 'bad_request', 'chain depth exceeded: possible upstream loop detected');
-                }
-                let body = {};
-                try { body = await request.json(); } catch(e) {
-                    await logApiCall(db, ua, request, 400, 'bad_request');
-                    return upErr(400, 'bad_request', 'invalid request body');
-                }
-                const skuId = parseInt(body.sku_id);
-                const qty = parseInt(body.quantity) || 0;
-                const dsNo = (body.downstream_order_no || '').toString().trim().substring(0, 64) || null;
-                const traceId = (body.trace_id || '').toString().substring(0, 64) || null;
-                const cbUrl = (body.callback_url || '').toString().trim().substring(0, 500) || null;
-                if (!skuId || qty < 1) {
-                    await logApiCall(db, ua, request, 400, 'bad_request');
-                    return upErr(400, 'bad_request', 'sku_id 与 quantity 必填');
-                }
-                // callback_url SSRF 防护（协议强制要求）
-                if (cbUrl) {
-                    if (!/^https?:\/\//i.test(cbUrl)) {
-                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
-                        return upErr(400, 'invalid_callback_url', 'callback_url must be http(s)');
-                    }
-                    try {
-                        const cu = new URL(cbUrl);
-                        const hn = cu.hostname.toLowerCase();
-                        if (hn === 'localhost' || hn.endsWith('.local') || hn.endsWith('.internal') ||
-                            /^127\./.test(hn) || /^10\./.test(hn) || /^192\.168\./.test(hn) ||
-                            /^172\.(1[6-9]|2\d|3[01])\./.test(hn) || /^169\.254\./.test(hn) || hn === '::1' || hn === '0.0.0.0') {
-                            await logApiCall(db, ua, request, 400, 'invalid_callback_url');
-                            return upErr(400, 'invalid_callback_url', 'callback_url must not point to a private/loopback address');
-                        }
-                    } catch(e) {
-                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
-                        return upErr(400, 'invalid_callback_url', 'callback_url is not a valid URL');
-                    }
-                    if (ua.cred.allow_callback !== 1) {
-                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
-                        return upErr(400, 'invalid_callback_url', 'callback is disabled for this api key');
-                    }
-                    let wl = [];
-                    try { wl = ua.cred.callback_whitelist ? JSON.parse(ua.cred.callback_whitelist) : []; } catch(e) {}
-                    if (wl.length && !wl.some(u => cbUrl.indexOf(String(u).replace(/\/$/, '')) === 0)) {
-                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
-                        return upErr(400, 'invalid_callback_url', 'callback_url is not in the whitelist');
-                    }
-                }
-                // 幂等
-                if (dsNo) {
-                    const oldRef = await db.prepare('SELECT * FROM api_order_refs WHERE credential_id=? AND downstream_order_no=?').bind(ua.cred.id, dsNo).first();
-                    if (oldRef) {
-                        const old = await db.prepare('SELECT * FROM orders WHERE id=?').bind(oldRef.order_id).first();
-                        if (old) {
-                            await logApiCall(db, ua, request, 200, 'idempotent_hit');
-                            return jsonRes({ ok: true, order_id: oldRef.id, order_no: old.id,
-                                status: old.status === 1 ? 'delivered' : (old.status === 0 ? 'pending_payment' : 'canceled'),
-                                amount: (parseFloat(old.total_amount) || 0).toFixed(2), currency: 'CNY' });
-                        }
-                    }
-                }
-                const v = await db.prepare('SELECT v.*, p.name as product_name, p.api_enabled, p.active as product_active, p.member_price_enabled FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id=?').bind(skuId).first();
-                if (!v || v.api_enabled !== 1 || v.product_active !== 1) {
-                    await logApiCall(db, ua, request, 400, 'product_unavailable');
-                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'product_unavailable', error_message: 'product is not available' });
-                }
-                if (v.active !== 1) {
-                    await logApiCall(db, ua, request, 400, 'sku_unavailable');
-                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'sku is not active' });
-                }
-                // 库存
-                const stock = await upStockOf(v);
-                if (stock < qty) {
-                    await logApiCall(db, ua, request, 400, 'sku_unavailable');
-                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'insufficient stock' });
-                }
-                // 计价
-                const unit = await apiUnitPrice(db, ua, v, { member_price_enabled: v.member_price_enabled }, qty);
-                const total = Math.round(unit * qty * 100) / 100;
-                // ⚠️ 协议约定：余额不足返回 HTTP 200 + ok:false + payment_failed
-                if ((parseFloat(ua.user.balance) || 0) < total) {
-                    await logApiCall(db, ua, request, 200, 'payment_failed');
-                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: total.toFixed(2), currency: 'CNY', error_code: 'payment_failed', error_message: 'wallet payment failed: insufficient balance' });
-                }
-                const orderId = uuid();
-                const now = time();
-                // 卡密原子抢占
-                let cards = [];
-                if (v.auto_delivery === 1) {
-                    const cands = (await db.prepare('SELECT id FROM cards WHERE variant_id=? AND status=0 ORDER BY id ASC LIMIT ?').bind(skuId, qty).all()).results || [];
-                    if (cands.length < qty) {
-                        return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'insufficient stock' });
-                    }
-                    const ids = cands.map(c => c.id);
-                    const ph = ids.map(() => '?').join(',');
-                    await db.prepare(`UPDATE cards SET status=1, order_id=? WHERE id IN (${ph}) AND status=0`).bind(orderId, ...ids).run();
-                    cards = (await db.prepare('SELECT id, content FROM cards WHERE order_id=? AND variant_id=? ORDER BY id ASC').bind(orderId, skuId).all()).results || [];
-                    if (cards.length < qty) {
-                        await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=? AND variant_id=?').bind(orderId, skuId).run();
-                        return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'stock race, please retry' });
-                    }
-                }
-                // 扣余额
-                const dec = await db.prepare('UPDATE users SET balance = balance - ?, updated_at=? WHERE id=? AND balance >= ?').bind(total, now, uid, total).run();
-                if (!dec.success || dec.meta.changes !== 1) {
-                    if (cards.length) await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(orderId).run();
-                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: total.toFixed(2), currency: 'CNY', error_code: 'payment_failed', error_message: 'wallet payment failed: insufficient balance' });
-                }
-                await db.prepare('INSERT INTO orders (id, trade_no, variant_id, product_name, variant_name, price, quantity, total_amount, contact, query_password, payment_method, created_at, status, cards_sent, user_id, order_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-                    .bind(orderId, dsNo, skuId, v.product_name, v.name, unit, qty, total.toFixed(2),
-                        ua.user.email || uname, 'api_' + ua.cred.id, 'balance', now, 1,
-                        cards.length ? JSON.stringify(cards.map(c => ({ id: c.id, content: c.content }))) : null, uid, 'api').run();
-                await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-                    .bind(uid, -total, 'api_purchase', 'dujiao 采购 ' + v.product_name + ' x' + qty, orderId, now).run();
-                const refIns = await db.prepare('INSERT INTO api_order_refs (credential_id, order_id, downstream_order_no, trace_id, callback_url, callback_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-                    .bind(ua.cred.id, orderId, dsNo, traceId, cbUrl, cbUrl ? 'pending' : 'none', now).run();
-                // [v3+] 发货完成 → 出站回调（ctx.waitUntil 后台投递，3 次退避重试，不阻塞响应）
-                if (cbUrl && ua.cred.allow_callback !== 0) {
-                    const cbPayload = buildApiCallbackPayload('order.delivered', {
-                        refId: refIns.meta.last_row_id, orderNo: orderId,
-                        downstreamOrderNo: dsNo, traceId, status: 'delivered',
-                        amount: total.toFixed(2),
-                        cards: cards.map(c => stripCardNote(c.content)), deliveredAt: now
-                    });
-                    try { ctx.waitUntil(deliverApiCallback(db, ua.cred, refIns.meta.last_row_id, cbUrl, cbPayload)); } catch (e) {}
-                }
-                await logApiCall(db, ua, request, 200);
-                return jsonRes({ ok: true, order_id: refIns.meta.last_row_id, order_no: orderId,
-                    status: 'delivered', amount: total.toFixed(2), currency: 'CNY' });
-            }
-
-            // ---- GET /api/v1/upstream/orders/{id} ----
-            const ordMatch = path.match(/^\/api\/v1\/upstream\/orders\/(\d+)$/);
-            if (ordMatch && method === 'GET') {
-                const refId = parseInt(ordMatch[1]);
-                const ref = await db.prepare('SELECT * FROM api_order_refs WHERE id=? AND credential_id=?').bind(refId, ua.cred.id).first();
-                if (!ref) { await logApiCall(db, ua, request, 404, 'order_not_found'); return upErr(404, 'product_not_found', 'order not found'); }
-                const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(ref.order_id).first();
-                if (!o) { await logApiCall(db, ua, request, 404, 'order_not_found'); return upErr(404, 'product_not_found', 'order not found'); }
-                let payload = '';
-                try {
-                    const cr = (await db.prepare('SELECT content FROM cards WHERE order_id=? ORDER BY id ASC').bind(ref.order_id).all()).results || [];
-                    payload = cr.map(c => c.content).join('\n');
-                } catch(e) {}
-                await logApiCall(db, ua, request, 200);
-                return jsonRes({
-                    order_id: ref.id, order_no: o.id,
-                    status: o.status === 1 ? 'delivered' : (o.status === 0 ? 'pending_payment' : 'canceled'),
-                    amount: (parseFloat(o.total_amount) || 0).toFixed(2),
-                    refunded_amount: '0.00', currency: 'CNY',
-                    fulfillment: o.status === 1 ? {
-                        type: 'auto', status: 'delivered', payload,
-                        delivery_data: {},
-                        delivered_at: new Date((o.paid_at || o.created_at || 0) * 1000).toISOString()
-                    } : null,
-                    refund_records: []
-                });
-            }
-
-            // ---- POST /api/v1/upstream/orders/{id}/cancel ----
-            const cancelMatch = path.match(/^\/api\/v1\/upstream\/orders\/(\d+)\/cancel$/);
-            if (cancelMatch && method === 'POST') {
-                const refId = parseInt(cancelMatch[1]);
-                const ref = await db.prepare('SELECT * FROM api_order_refs WHERE id=? AND credential_id=?').bind(refId, ua.cred.id).first();
-                if (!ref) { await logApiCall(db, ua, request, 404, 'order_not_found'); return upErr(404, 'product_not_found', 'order not found'); }
-                const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(ref.order_id).first();
-                if (!o) return jsonRes({ ok: false });
-                if (o.status !== 0) { await logApiCall(db, ua, request, 409, 'already_paid'); return jsonRes({ ok: false }); }
-                const now = time();
-                await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(ref.order_id).run();
-                await touchProductsByOrder(db, ref.order_id);
-                await db.prepare('UPDATE users SET balance = balance + ?, updated_at=? WHERE id=?').bind(o.total_amount, now, uid).run();
-                await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-                    .bind(uid, parseFloat(o.total_amount), 'api_refund', 'dujiao 取消订单退回余额', ref.order_id, now).run();
-                await db.prepare('UPDATE orders SET status=2 WHERE id=?').bind(ref.order_id).run();
-                await logApiCall(db, ua, request, 200);
-                return jsonRes({ ok: true });
-            }
-
-            await logApiCall(db, ua, request, 404, 'not_found');
-            return upErr(404, 'product_not_found', 'endpoint not found');
-        }
-
-        // ===========================
-        // --- 开放 API (Open) /api/open/v1/* ---
+                // --- 开放 API (Open) /api/open/v1/* ---
         // ===========================
         if (path.startsWith('/api/open/v1/')) {
             await ensureApiTables(db);

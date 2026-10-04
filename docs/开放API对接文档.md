@@ -132,7 +132,9 @@ signature   = hex( HMAC-SHA256( api_secret, sign_string ) )
 ## 三、acg-faka 协议 `/shared/*`
 
 契约复刻自 `acg-faka/app/Util/Str.php` 的 `generateSignature` 与
-`app/Interceptor/SharedValidation.php`。
+`app/Interceptor/SharedValidation.php`；端点出参已按 acg-faka 3.1.2 源码逐项对齐
+（服务器端 `app/Controller/Shared/Commodity.php` + 客户端 `app/Service/Bind/Shared.php`
++ 字段白名单 `app/Util/SharedPayload.php`）。
 
 ### 鉴权（易支付风格 MD5，**POST 表单**，非 JSON）
 
@@ -145,13 +147,36 @@ unset(sign) → ksort → 移除空串 → http_build_query(data) + "&key=" + ap
 
 响应封套：`{ "code": 200, "msg": "success", "data": {...} }`
 
-### 端点
+### 端点（已按 acg-faka 3.1.2 契约逐项对齐）
 
-`/shared/authentication/connect`、`/shared/commodity/{items,item,inventoryState,inventory,trade,draftCard,query/{tradeNo},stock,valuation,draft}`
+商品行字段 = COMMODITY_FIELDS（`id/category_id/name/description/cover/price/user_price/
+status/code/sort/delivery_way/draft_status/draft_premium/widget/minimum/maximum/config/stock/tags/...`）；
+分类字段 = CATEGORY_FIELDS（`id/name/sort/icon/status/pid`）。
 
-> **联调提示**：acg-faka 各端点的 `data` 内层字段名请以你的 acg-faka 版本为准
-> （它在 3.1.1 → 3.1.2 之间改过 `item`/`stock`/`draft`/`valuation` 的入参出参，
-> 并用 `protocol` 字段做代次兼容）。签名算法与鉴权流程是确定的，已按源码复刻。
+| 端点 | 入参（POST 表单） | data 出参 |
+|---|---|---|
+| `authentication/connect` | — | `{shopName, balance}` |
+| `commodity/items` | — | **分类树** `[{id,name,sort,icon,status,pid, children:[商品行]}]` |
+| `commodity/item` | `code`（兼容 `sharedCode`） | 单商品行 + `factory_price`（请求方拿货价；多规格=0，逐规格成本在 `config.category_factory`） |
+| `commodity/inventory` | `sharedCode`/`code`, `race` | `{count, delivery_way, draft_status, price, user_price, config, factory_price, is_category}` |
+| `commodity/inventoryState` | `shared_code`, `card_id`, `num`, `race` | 充足 `{}`；不足返回 code!=200 + `库存不足` |
+| `commodity/trade` | `shared_code`, `contact`, `num`, `card_id`, `race`, `request_no`, `sku` | **`{secret, trade_no, amount}`**，`secret` = 卡密文本 |
+| `commodity/query/{tradeNo}` | — | `{secret, widget, status}` |
+| `commodity/draftCard` | `code`, `limit`, `page`, `race` | `{list:[{id,draft,draft_premium}], total}` |
+| `commodity/draft` | `code`, `card_id` | `{draft_premium}` |
+| `commodity/stock` | `code`, `race` | `{stock}` |
+| `commodity/valuation` | `code`, `num`, `race`, `card_id` | `{price: 总拿货价, currency_code: "CNY"}` |
+
+要点：
+- **`delivery_way`：0 = 卡密库存（自动发卡），1 = 人工**（acg-faka 的语义，勿颠倒）
+- `config` 是 **INI 文本**（acg-faka 自研 `Ini` 解析器格式）：多规格商品输出
+  `[category]`（race=挂牌价）/ `[shared_mapping]`（race=规格id）/ `[category_factory]`（race=拿货价）三段；
+  race key 会清洗掉 `. = [ ]` 换行（INI 语法字符），回传时支持 race key / 原名 / 规格 id 三种写法
+- **失败一律 code != 200**（acg-faka 抛 `JSONException` 时 code=0，客户端只看是否 200）；
+  **HTTP 恒 200** —— 客户端把 HTTP 404/405 当「老版本上游」探测信号，绝不能回
+- `trade` 幂等键 = `request_no`（同凭证重复调用回放已有订单含 `secret`，不重复扣款）；
+  预选（`card_id`≠0）时数量强制 1，按指定卡出货
+- 卡密文本已剥掉 `#[备注]` 标记
 
 ---
 
