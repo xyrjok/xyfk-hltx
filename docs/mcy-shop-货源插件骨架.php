@@ -70,6 +70,7 @@ class XyfkForeignShip extends ForeignShip
         $skus = [];
         foreach (($g['skus'] ?? []) as $s) {
             // Sku 构造签名：__construct(uniqueId, name, pictureUrl, price) —— 4 参，顺序勿动
+            // price_amount = 调用方实付单价（已含会员折扣）→ 正好作进货价，与实际扣款一致
             $sku = new Sku(
                 (string)($s['id'] ?? ''),
                 (string)($s['name'] ?? ''),

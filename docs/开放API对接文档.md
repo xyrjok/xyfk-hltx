@@ -218,7 +218,8 @@ interface Ship { delivery(): string; stock(): int|string; hasEnoughStock(int $qu
 - `fixed_member` = 固定会员价：忽略批发档位，单价仅由会员折扣决定、与数量无关（对接平台/下游供货推荐）
 - `list` = 挂牌价，不打折
 
-**商品/规格报价字段语义**（与 dujiao-next 官方供货实现 `toUpstreamProductWithMemberPrice` 一致）：
+**商品/规格报价字段语义**（`/api/open/v1/*` 与 `/api/v1/upstream/*` 统一口径，
+与 dujiao-next 官方供货实现 `toUpstreamProductWithMemberPrice` 一致）：
 - `price_amount` = 调用方**实付单价**（已含该会员折扣；买 1 件口径，`fixed_member` 下任意数量同价）
 - `original_price` = 挂牌原价
 - `member_price` = 会员折扣价（无折扣时不返回）

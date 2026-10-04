@@ -2228,6 +2228,8 @@ async function handleApi(request, env, url, ctx) {
                 await logApiCall(db, auth, request, 403, 'insufficient_scope');
                 return openErr(403, 'api key 无权执行此操作（scopes 未授予）');
             }
+            // [v3++] 会员折扣每请求解析一次（报价与计价共用，避免逐 SKU 查库）
+            const openDiscount = await resolveMemberDiscount(db, auth.user.member_level);
 
             // 统计可用库存（自动发货 = 未售卡密数；手动发货 = variants.stock）
             const stockOf = async (variant) => {
@@ -2246,12 +2248,19 @@ async function handleApi(request, env, url, ctx) {
                         try { wc = typeof v.wholesale_config === 'string' ? JSON.parse(v.wholesale_config) : v.wholesale_config; } catch(e) { wc = null; }
                     }
                     const stock = await stockOf(v);
+                    // [v3++] 报价语义与 /api/v1/upstream/* 一致：price_amount = 调用方实付单价
+                    //        （买 1 件口径，fixed_member 下任意数量同价），original_price = 挂牌原价，
+                    //        member_price = 会员折扣价（无折扣不返回）——下游按 price_amount 记进货价即与实际扣款一致
+                    const base = parseFloat(v.price) || 0;
+                    const disc = (p.member_price_enabled !== 0) ? openDiscount : 100;
+                    const unit = await apiUnitPrice(db, auth, v, { member_price_enabled: p.member_price_enabled }, 1, openDiscount);
                     skus.push({
                         id: v.id,
                         sku_code: 'v' + v.id,
                         name: v.name,
-                        price_amount: (parseFloat(v.price) || 0).toFixed(2),
-                        original_price: (parseFloat(v.price) || 0).toFixed(2),
+                        price_amount: unit.toFixed(2),
+                        original_price: base.toFixed(2),
+                        member_price: disc < 100 ? (Math.round((base * disc / 100) * 100) / 100).toFixed(2) : undefined,
                         wholesale_prices: Array.isArray(wc) ? wc.map(r => ({ qty: parseInt(r.qty) || 0, price: (parseFloat(r.price) || 0).toFixed(2) })) : [],
                         stock_quantity: v.auto_delivery === 1 ? stock : (parseInt(v.stock) || 0),
                         stock_status: stock > 0 ? 'in_stock' : 'out_of_stock',
@@ -2259,6 +2268,10 @@ async function handleApi(request, env, url, ctx) {
                         auto_delivery: v.auto_delivery === 1 ? 1 : 0
                     });
                 }
+                const minOf = (key) => {
+                    const vals = skus.map(s => parseFloat(s[key])).filter(x => !isNaN(x));
+                    return vals.length ? vals.sort((a, b) => a - b)[0].toFixed(2) : '0.00';
+                };
                 return {
                     id: p.id,
                     category_id: p.category_id,
@@ -2266,7 +2279,9 @@ async function handleApi(request, env, url, ctx) {
                     description: (p.description || '').replace(/<[^>]+>/g, '').substring(0, 500),
                     image_url: p.image_url || '',
                     tags: p.tags || '',
-                    price_amount: skus.length ? skus.map(s => parseFloat(s.price_amount)).sort((a, b) => a - b)[0].toFixed(2) : '0.00',
+                    price_amount: minOf('price_amount'),
+                    original_price: minOf('original_price'),
+                    member_price: skus.some(s => s.member_price) ? minOf('member_price') : undefined,
                     currency: 'CNY',
                     fulfillment_type: (vars[0] && vars[0].auto_delivery === 1) ? 'auto' : 'manual',
                     is_active: p.active === 1,

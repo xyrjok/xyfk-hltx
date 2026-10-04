@@ -737,9 +737,17 @@ components:
           description: 规格名称
           example: 月卡
         price_amount:
-          $ref: '#/components/schemas/MoneyString'
+          allOf:
+            - $ref: '#/components/schemas/MoneyString'
+          description: 调用方实付单价（已含该 key 的会员折扣；买 1 件口径，fixed_member 模式下任意数量同价）
         original_price:
-          $ref: '#/components/schemas/MoneyString'
+          allOf:
+            - $ref: '#/components/schemas/MoneyString'
+          description: 挂牌原价
+        member_price:
+          allOf:
+            - $ref: '#/components/schemas/MoneyString'
+          description: 会员折扣价（无折扣时不返回）
         wholesale_prices:
           type: array
           description: 批发价档位（按 qty 排列，无则为空数组）
@@ -789,7 +797,17 @@ components:
           description: 标签（原样返回，无则为空字符串）
           example: ''
         price_amount:
-          $ref: '#/components/schemas/MoneyString'
+          allOf:
+            - $ref: '#/components/schemas/MoneyString'
+          description: 商品实付起价（最低 SKU 实付单价）
+        original_price:
+          allOf:
+            - $ref: '#/components/schemas/MoneyString'
+          description: 商品挂牌起价（最低 SKU 原价）
+        member_price:
+          allOf:
+            - $ref: '#/components/schemas/MoneyString'
+          description: 会员折扣起价（无折扣时不返回）
         currency:
           type: string
           description: 币种，固定 CNY
