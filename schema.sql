@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS categories (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     name      TEXT NOT NULL,
     sort      INTEGER DEFAULT 0,
-    image_url TEXT
+    image_url TEXT,
+    updated_at INTEGER
 );
 INSERT OR IGNORE INTO categories (id, name, sort, image_url) VALUES (1, '谷歌美国电话/GoogleVoice /GV靓号AAA', 0, 'https://fengzi.eu.org/image/07f005d6-068f-4328-a90c-dad528e9f52a.webp');
 
@@ -43,7 +44,11 @@ CREATE TABLE IF NOT EXISTS products (
     image_url   TEXT,
     tags        TEXT,
     seo_description TEXT,
-    member_price_enabled INTEGER DEFAULT 1
+    member_price_enabled INTEGER DEFAULT 1,
+    -- [v2] 是否允许被外部平台通过 /api/open/v1 调用购买（白名单制，默认关闭）
+    api_enabled INTEGER DEFAULT 0,
+    -- [修复] 最后变更时间（增量同步 / updated_after 用）；规格/卡密变动时由触发器联动推高
+    updated_at  INTEGER
 );
 
 INSERT OR IGNORE INTO products (id, category_id, name, description, sort, active, created_at, image_url, tags, seo_description) VALUES (1, 1, '(AAA老号)GoogleVoice /GV靓号', '<p style="line-height: 1;">发货格式有两种：</p>
@@ -91,6 +96,9 @@ CREATE TABLE IF NOT EXISTS variants (
     sort             INTEGER DEFAULT 0,
     active           INTEGER DEFAULT 1,
     random_mode_text TEXT,
+    -- [修复] 最后变更时间：规格价格/库存变动时联动推高 products.updated_at，
+    --        保证下游 /api/v1/upstream/products?updated_after= 增量同步不漏规格变更
+    updated_at       INTEGER,
     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
 );
 INSERT OR IGNORE INTO variants (id, product_id, name, price, stock, color, image_url, wholesale_config, custom_markup, sales_count, auto_delivery, created_at, selection_label, sort, active, random_mode_text) VALUES
@@ -105,6 +113,8 @@ CREATE TABLE IF NOT EXISTS cards (
     content    TEXT NOT NULL,
     status     INTEGER DEFAULT 0,
     order_id   TEXT,
+    -- [v2] 出货渠道溯源：哪个 API 凭证出的货
+    api_ref_id INTEGER,
     created_at INTEGER,
     FOREIGN KEY (variant_id) REFERENCES variants(id) ON DELETE CASCADE
 );
@@ -158,7 +168,9 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at     INTEGER,
     paid_at        INTEGER,
     query_password TEXT,
-    user_id         INTEGER
+    user_id         INTEGER,
+    -- [v2] shop=零售 / recharge=会员充值 / api=API采购
+    order_type      TEXT DEFAULT 'shop'
 );
 
 -- 10. 自定义页面表 (并插入3个不可删除的默认页)
@@ -189,7 +201,7 @@ CREATE TABLE IF NOT EXISTS pay_gateways (
 );
 
 -- 11.5 支付网关初始数据
-INSERT OR IGNORE INTO pay_gateways (id, name, type, config, active, remark, sort) VALUES (1, '支付宝', 'alipay_f2f', '{"icon":"/assets/alipay.webp","app_id":"2019090466899782","private_key":"MIIEowIBAAKCAQEAq3Ho3l3B3duoyWlP7MsrlAxbnr1xNaMOB8MkdYKuTCdEZGvF4VmC0PFMRmKsXb9GRi1F6tqdrLKCPty73mslRh2xrNugXr3zkLH1/dvpTPK+q7HBvOY26lvqc9qUU8pZ/Cmbbg1HcqsJQy2fySl+VyTy4GgQaNEkny/lpfEUAu3fsaC28qOqY3cd4Y574Mp0XN7ntwhp7T1dGdXXcpgjpu6eeEZ4Suwa3+SqzTV7xheEiDZzcX5ZS1enb6NHOcSga1D1rVjxiMNGhzJtb2vPEgbrcgl7nwFmbR5NwQzSHslrcxUw0ArAOBtsUlRQxF3iaJw4t3r30VGoFI11rKmNVQIDAQABAoIBAQCnxFDvAGpMcr3JUh+fBPWA61LglFrq9MMu/1t3DkkHRkmbxwadTR1A308XdUlcd2cKFxVbC1DOBOSFJTVGIi0YXshV8ZkN/O0SA8NHBmJXJRdGJi0Cb3j/frB/bD5HfDTwF7r8R0xKPmpS7Zt1mwABwKtWwx6Do10l1RXxe2ZsscVr5dZ7/LB0j/HDDGKqCR73KYZ1cQOr3FOOfXuNu/pk5wbrqk7RZDcEF1SaSdiUZHCCaOXwlfyqwyTP0ecKxXc2G/JzP8s2JWoOFlYgMjUUGgJjPfTTULthtG+qB4UTtpIE8IQ8DIaN1/N22/msF0opm3v5avOO5XMx/j2H40jFAoGBANSXKxynps7/UipPHQ03HYkEmnfYI1kpxKVXp9PJ4pj5oqbIfUOLD39+vEd64ddv4BpB5CGunNLFX77nR+cXuMzYxI8piWL0sm+KCYlINVVXExBDlmT3EeHJZ0qafMnL7NKs3fcJjZSdBciUi8VXTZgSmqOE9Tq6SjqwV0R8wfNbAoGBAM5z7FibqnfGKoXTIEiVQxmTuDzLnMPYctkgf5+B1KIwdWZA6n3y5rFTS/fnKg47J+Ebqcp6779S9SK93E3eII9huUdCEYAISxqOfRsibukwXCH90t9GuXAiv2K8s9vXf+dQwxIcOvvAEiAlv7JViTOtwo2xb1g1hMEhWc4eDdEPAoGAY1KZPtMJOS7KmZ/Kx/DXKLvw20stAKxmBoXUkDuDVctT9a438AWZYQy6NH8x4rCPOFVOm3n0JPk4CX4O9uX7XiFsfCKA4K3IbBpG6E/HMy7yZifdrSBNx3qMequA39sZszg2oANjlWpjWFomjzWBuCoA+6LT2/NLWO4oZ4QOLX8CgYBm9dEs75U4Xo/eZch36liobM85IqJv2YaNWnPLbMhKirhB4qYPYhBC5zO/0n1a042z6kPnQyBF3m16gg1YmCrM1wO70etAWuJ5wA4MdkOx7/hCy39a8r6QegPQjiN0xCh5iAGBCqsv2j4v4iOUIKxoJYQdfhv1ddtbJfLPpJVnaQKBgB6L4H9IlLm+bAVJUdsqS7JdIubaTA7fJkM1nl5S7qm2z4H+Vn2sFJ+R1++Ghu9eXWguzcJ0Iy5w5LOAdmxT4yzLIMYvLmeOJkCr2wuyh5oaIKU8Tzv6qcXEWRQMLEaXfspqzGOLxWEo8sWQLd/1I7J3MoID3FzCddjoevIVuFKh","alipay_public_key":"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvzuJKibRBk0tOkIVRdIJk6A7SegTu6ANcQ5t2sBLuS8mBn/zK/l5msIIWxlpXkl5xbp67jrzonH8w4BeMcQDhv1wMpW3u6KWsxae1FV+3c+rpvcSOei4QXxqWXswQVmj2kkkjF3VXi5+KaUjxWjWcuJtsl/4MAMNb+3TdOTuMGTxeg1yM+UceeJwF20cpKMQIJ7ZADImX8+sKluDAYzkBxbAsxbiAqney6SLL0YPWbeqEGLxigXxfnwLR//o854rupcujWO3u+gizNG/VraQGLfYJ1Rlpu0icOkYsESCqsnLDMcMtV/uKm47yKcBxj+408qS5wGAzTtKX5qNlS1o8QIDAQAB"}', 1, '需要改成自己的支付宝当面付', 0);
+INSERT OR IGNORE INTO pay_gateways (id, name, type, config, active, remark, sort) VALUES (1, '支付宝', 'alipay_f2f', '{"icon":"/assets/alipay.webp","app_id":"请填入你的支付宝AppID","private_key":"请填入你的支付宝应用私钥(应用私钥)","alipay_public_key":"请填入你的支付宝公钥"}', 1, '【必填】请在后台-支付网关中填入你自己的支付宝当面付密钥；切勿提交明文密钥到仓库', 0);
 
 -- 12. 系统配置表 (并初始化必填项)
 CREATE TABLE IF NOT EXISTS site_config (
@@ -206,6 +218,9 @@ INSERT OR IGNORE INTO site_config (key, value) VALUES
 ('show_site_logo', '1'),
 ('admin_captcha_active', '1'),
 ('member_discount', '100'),
+('member_recharge_limit_per_tx_default', '0'),
+('member_recharge_limit_total_default', '0'),
+('recharge_max_per_tx', '10000'),
 ('footer_html', '<div class="footer-links"><a href="/custom?alias=terms" target="_blank">服务条款</a> <a href="/custom?alias=disclaimer" target="_blank">免责声明</a> <a href="/custom?alias=about-us" target="_blank">关于我们</a><p>Copyright @ 2026<a href="/" target="_blank">夏雨自动发卡系统</a>欢迎选购！</p></div>');
 
 -- 13. 会员表
@@ -217,6 +232,16 @@ CREATE TABLE IF NOT EXISTS users (
     email               TEXT UNIQUE,
     balance             REAL DEFAULT 0,
     frozen              INTEGER DEFAULT 0,
+    member_level        INTEGER DEFAULT 0,
+    total_recharge      REAL DEFAULT 0,
+    -- [v1] 自助充值限额：单笔/累计，0 = 不限（仅约束会员自助充值，管理员手动加余额不受限）
+    recharge_limit_per_tx REAL DEFAULT 0,
+    recharge_limit_total  REAL DEFAULT 0,
+    -- [v1] 等级来源：auto = 自动升级规则管；manual = 管理员手动设定（优先级最高，自动规则不再改动）
+    auto_level          INTEGER DEFAULT 0,
+    level_source        TEXT DEFAULT 'auto',
+    -- [v1] 累计入金 = 自助充值 + 管理员手动加余额（自动升级规则的判定口径）
+    total_incoming      REAL DEFAULT 0,
     created_at          INTEGER,
     updated_at          INTEGER
 );
@@ -233,7 +258,85 @@ CREATE TABLE IF NOT EXISTS balance_transactions (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- 15. 频率限制表 (独立于 site_config，便于管理和自动清理)
+-- 16. [v2] API 凭证表（一个会员一把 key）
+CREATE TABLE IF NOT EXISTS api_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    api_key TEXT NOT NULL UNIQUE,
+    api_secret TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'approved',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    reject_reason TEXT,
+    scopes TEXT DEFAULT '',
+    rate_limit_per_min INTEGER DEFAULT 60,
+    price_mode TEXT DEFAULT 'member',
+    allow_callback INTEGER DEFAULT 1,
+    callback_whitelist TEXT,
+    last_used_at INTEGER,
+    created_at INTEGER,
+    updated_at INTEGER
+);
+
+-- 17. [v2] 下游订单幂等 + 回调状态
+CREATE TABLE IF NOT EXISTS api_order_refs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER NOT NULL,
+    order_id TEXT NOT NULL,
+    downstream_order_no TEXT,
+    trace_id TEXT,
+    callback_url TEXT,
+    callback_status TEXT DEFAULT 'pending',
+    callback_attempts INTEGER DEFAULT 0,
+    created_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_aor_cred_downstream ON api_order_refs(credential_id, downstream_order_no);
+CREATE INDEX IF NOT EXISTS idx_aor_order_id ON api_order_refs(order_id);
+
+-- 18. [v2] API 调用审计
+CREATE TABLE IF NOT EXISTS api_call_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER,
+    user_id INTEGER,
+    method TEXT,
+    path TEXT,
+    status_code INTEGER,
+    error_code TEXT,
+    ip TEXT,
+    created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_acl_user ON api_call_logs(user_id, created_at);
+
+-- 18a. [v3+] 上游连接（采购方适配器）
+CREATE TABLE IF NOT EXISTS upstream_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    base_url TEXT NOT NULL,
+    protocol TEXT DEFAULT 'open-v1',
+    api_key TEXT,
+    api_secret TEXT,
+    enabled INTEGER DEFAULT 1,
+    last_sync_at INTEGER,
+    created_at INTEGER,
+    updated_at INTEGER
+);
+
+-- 18b. [v3+] 上游 SKU ↔ 本地规格 映射（sync 建立，purchase 自动补货用）
+CREATE TABLE IF NOT EXISTS upstream_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    connection_id INTEGER NOT NULL,
+    upstream_product_id TEXT,
+    upstream_sku_id TEXT NOT NULL,
+    local_product_id INTEGER,
+    local_variant_id INTEGER,
+    name TEXT,
+    price REAL DEFAULT 0,
+    stock INTEGER DEFAULT 0,
+    created_at INTEGER,
+    updated_at INTEGER,
+    UNIQUE(connection_id, upstream_sku_id)
+);
+
+-- 19. 频率限制表 (独立于 site_config，便于管理和自动清理)
 CREATE TABLE IF NOT EXISTS rate_limits (
     key           TEXT PRIMARY KEY,
     count         INTEGER DEFAULT 1,

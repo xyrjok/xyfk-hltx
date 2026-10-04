@@ -295,7 +295,37 @@
                                     <!-- 动态生成 -->
                                 </div>
                                 <button class="btn btn-outline-success btn-sm mt-2" onclick="addUpgradeRule()"><i class="fas fa-plus"></i> 添加升级规则</button>
-                                <div class="form-text text-muted mt-2">当会员累计充值金额达到设定值时，自动升级到对应等级。升级为单向（只升不降）。</div>
+                                <div class="form-text text-muted mt-2">当会员<b>累计入金</b>（自助充值 + 管理员手动加余额）达到设定值时，自动升级到对应等级。升级为单向（只升不降）。
+                                    <br><b>注意</b>：若管理员已手动设定某会员等级（会员管理里显示「手动」标记），则自动升级<b>不会</b>改动该会员等级，直到点「交还自动管理」。</div>
+
+                                <h6 class="mb-3 border-bottom pb-2 mt-4"><i class="fas fa-sliders-h text-secondary"></i> 自助充值限额</h6>
+                                <div class="row g-2">
+                                    <div class="col-md-4">
+                                        <label class="form-label small">全局单笔上限</label>
+                                        <div class="input-group input-group-sm">
+                                            <input type="number" class="form-control" id="recharge_max_per_tx" min="0" step="1">
+                                            <span class="input-group-text">元</span>
+                                        </div>
+                                        <div class="form-text">0 = 不限。与会员个人单笔限额<b>取小者</b>生效。</div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">新会员默认单笔限额</label>
+                                        <div class="input-group input-group-sm">
+                                            <input type="number" class="form-control" id="member_recharge_limit_per_tx_default" min="0" step="1">
+                                            <span class="input-group-text">元</span>
+                                        </div>
+                                        <div class="form-text">新建会员时的默认值，0 = 不限。</div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small">新会员默认累计限额</label>
+                                        <div class="input-group input-group-sm">
+                                            <input type="number" class="form-control" id="member_recharge_limit_total_default" min="0" step="1">
+                                            <span class="input-group-text">元</span>
+                                        </div>
+                                        <div class="form-text">新建会员时的默认值，0 = 不限。</div>
+                                    </div>
+                                </div>
+                                <div class="form-text text-muted mt-2">限额<b>只约束会员自助充值</b>；<b>管理员手动加余额不受限</b>（大额请走线下转账后在「会员管理 → 调整余额」入账）。个人限额可在「会员管理」里逐个覆盖。</div>
                             </div>
 
                             <div class="tab-pane fade" id="notify" role="tabpanel">
@@ -552,6 +582,10 @@
             document.getElementById('member_enabled').checked = (config.member_enabled === '1');
             try { memberLevelsData = JSON.parse(config.member_levels || '[]'); } catch(e) { memberLevelsData = []; }
             try { upgradeRulesData = JSON.parse(config.member_upgrade_rules || '[]'); } catch(e) { upgradeRulesData = []; }
+            // [v1] 自助充值限额配置（0 = 不限）
+            document.getElementById('recharge_max_per_tx').value = (config.recharge_max_per_tx !== undefined && config.recharge_max_per_tx !== '') ? config.recharge_max_per_tx : '10000';
+            document.getElementById('member_recharge_limit_per_tx_default').value = config.member_recharge_limit_per_tx_default || '0';
+            document.getElementById('member_recharge_limit_total_default').value = config.member_recharge_limit_total_default || '0';
             renderMemberLevels();
             renderUpgradeRules();
             // Power Automate 已删除
@@ -587,6 +621,10 @@
 			member_enabled: document.getElementById('member_enabled').checked ? '1' : '0',
             member_levels: JSON.stringify(memberLevelsData),
             member_upgrade_rules: JSON.stringify(upgradeRulesData),
+            // [v1] 自助充值限额（0 = 不限）
+            recharge_max_per_tx: (document.getElementById('recharge_max_per_tx').value || '0').trim(),
+            member_recharge_limit_per_tx_default: (document.getElementById('member_recharge_limit_per_tx_default').value || '0').trim(),
+            member_recharge_limit_total_default: (document.getElementById('member_recharge_limit_total_default').value || '0').trim(),
 			custom_js: document.getElementById('custom_js').value,
             
             // --- 订单推送设置保存 (管理员) ---

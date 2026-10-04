@@ -1,0 +1,1052 @@
+# =====================================================================
+# 开放 API（Open API）OpenAPI 3.0 规格
+# 适用于：Cloudflare Workers 发卡系统（见仓库根目录 _worker.js）
+# 覆盖端点：/api/open/v1/* 共 7 个
+#
+# 【统一响应封套】（对应代码中的 openOk / openErr）
+#   成功：HTTP 200，body = { "code": 200, "msg": "ok", "data": {...} }
+#   失败：HTTP 状态码 = code，body = { "code": <code>, "msg": "<错误说明>", "data": null }
+#         限流（429）时额外附带 "retry_after"（秒）
+#
+# 【鉴权】（对应代码中的 apiAuth）
+#   简单模式：Authorization: Bearer <api_key>（或 X-Api-Key: <api_key>）
+#   严格模式：X-Api-Key + X-Api-Timestamp + X-Api-Signature（HMAC-SHA256，防重放）
+#     签名串 = "{METHOD}\n{path}\n{timestamp}\n{sha256hex(body)}"
+#       - path 为不含 query string 的 URL 路径（如 /api/open/v1/order/query）
+#       - body 为请求体原文（GET / 空 body 按空字符串 "" 计算）
+#       - sha256hex("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+#       - timestamp 为 Unix 秒级时间戳，允许偏差 ±60 秒
+#       - signature = hex(HMAC-SHA256(api_secret, 签名串))，小写十六进制
+#     注：dujiao-next 协议（出站回调 notify_url / 上游供货入站）使用另一种签名串
+#         "{METHOD}\n{path}\n{timestamp}\n{md5hex(body)}"
+#         例："POST\n/api/v1/upstream/callback\n{timestamp}\n{md5hex(body)}"
+#         （空 body 的 MD5 = d41d8cd98f00b204e9800998ecf8427e），详见 open-api-examples.md
+#
+# 【scopes 权限】（对应代码中的 scopeAllows；scopes 为空 = 全部开放）
+#   catalog:read → goods/list、goods/detail、goods/stock
+#   order:write  → order/create（POST）
+#   order:read   → order/query、order/cancel、balance
+#   '*' 为全部权限
+#
+# 【限流】每个 API Key 固定窗口 60 秒，默认 60 次/分钟（rate_limit_per_min 可配置），超限返回 429
+# =====================================================================
+openapi: 3.0.3
+info:
+  title: 发卡系统 开放 API
+  version: '1.0.0'
+  description: |
+    Cloudflare Workers 发卡系统开放 API（/api/open/v1/*）。
+
+    ## 响应封套
+    - 成功：HTTP 200，`{ "code": 200, "msg": "ok", "data": {...} }`
+    - 失败：HTTP 状态码 = body 中的 `code`，`{ "code": <code>, "msg": "<错误说明>", "data": null }`
+    - 限流（429）额外返回 `retry_after`（建议等待秒数）
+
+    ## 鉴权
+    所有端点均需携带 API Key：
+    - 简单模式：`Authorization: Bearer <api_key>`（或 `X-Api-Key: <api_key>`）
+    - 严格模式（可选，防重放）：额外携带
+      - `X-Api-Timestamp`：Unix 秒级时间戳，允许偏差 ±60 秒
+      - `X-Api-Signature`：`hex(HMAC-SHA256(api_secret, "{METHOD}\n{path}\n{timestamp}\n{sha256hex(body)}"))`
+        - `path` 为不含 query string 的 URL 路径
+        - `body` 为请求体原文，GET / 空 body 按空字符串计算
+          （`sha256hex("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`）
+      - 提供了 Timestamp 或 Signature 任一个就必须同时提供两个
+
+    ## scopes 权限
+    - `catalog:read`：goods/list、goods/detail、goods/stock
+    - `order:write`：order/create
+    - `order:read`：order/query、order/cancel、balance
+    - scopes 为空 = 全部开放；`*` = 全部权限
+
+    ## 限流
+    每个 API Key 固定窗口 60 秒，默认 60 次/分钟，超限返回 429 + `retry_after`。
+
+    ## 金额
+    所有金额字段均为保留 2 位小数的字符串，币种固定 CNY。
+  contact:
+    name: API 支持
+servers:
+  - url: https://your-domain.example
+    description: 部署站点根地址（示例，请替换为实际域名）
+security:
+  - BearerAuth: []
+  - ApiKeyHeader: []
+tags:
+  - name: 商品
+    description: '商品 / 规格 / 库存查询（scopes: catalog:read）'
+  - name: 订单
+    description: '下单 / 查单 / 取消（scopes: order:write / order:read）'
+  - name: 账户
+    description: '余额与账户信息（scopes: order:read）'
+
+paths:
+  # ------------------------------------------------------------------
+  # 1. 余额查询
+  # ------------------------------------------------------------------
+  /api/open/v1/balance:
+    get:
+      tags: [账户]
+      summary: 查询当前 API Key 所属账户余额
+      description: |
+        需要 scopes：`order:read`（scopes 为空则不限制）。
+        返回账户余额、会员等级、计价模式（price_mode）与当前 API Key。
+      operationId: getBalance
+      security:
+        - BearerAuth: []
+        - ApiKeyHeader: []
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BalanceData'
+              example:
+                code: 200
+                msg: ok
+                data:
+                  user_id: 1
+                  username: demo@example.com
+                  balance: '100.00'
+                  currency: CNY
+                  member_level: 2
+                  price_mode: member
+                  api_key: sk_xxxxxxxxxxxxxxxx
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ------------------------------------------------------------------
+  # 2. 商品列表
+  # ------------------------------------------------------------------
+  /api/open/v1/goods/list:
+    get:
+      tags: [商品]
+      summary: 分页获取开放 API 销售的商品列表
+      description: |
+        需要 scopes：`catalog:read`。
+        只返回 `active=1` 且 `api_enabled=1` 的商品，按 `sort` 降序、`id` 升序排列。
+        结果带 60 秒边缘缓存（命中时返回 `cache_hit`，数据可能最多滞后 60 秒，库存请以 goods/stock 为准）。
+      operationId: listGoods
+      security:
+        - BearerAuth: []
+        - ApiKeyHeader: []
+      parameters:
+        - name: category_id
+          in: query
+          required: false
+          description: 按分类 ID 过滤（可选）
+          schema:
+            type: integer
+          example: 3
+        - name: page
+          in: query
+          required: false
+          description: 页码，最小 1，默认 1
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: page_size
+          in: query
+          required: false
+          description: 每页条数，1~100，默认 20
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          example: 20
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GoodsListData'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ------------------------------------------------------------------
+  # 3. 商品详情
+  # ------------------------------------------------------------------
+  /api/open/v1/goods/detail:
+    get:
+      tags: [商品]
+      summary: 获取单个商品详情（含全部在售规格）
+      description: |
+        需要 scopes：`catalog:read`。
+        返回结构与商品列表中的单个 item 相同（Goods）。
+        错误：`400 缺少商品 id`；`404 商品不存在或未开放 API 销售`。
+      operationId: getGoodsDetail
+      security:
+        - BearerAuth: []
+        - ApiKeyHeader: []
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: 商品 ID（必填，整数）
+          schema:
+            type: integer
+          example: 1
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Goods'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ------------------------------------------------------------------
+  # 4. 实时库存
+  # ------------------------------------------------------------------
+  /api/open/v1/goods/stock:
+    get:
+      tags: [商品]
+      summary: 查询商品实时库存（可精确到规格）
+      description: |
+        需要 scopes：`catalog:read`。
+        库存口径：自动发货（auto_delivery=1）= 未售卡密数量；手动发货 = 规格 stock 字段。
+        不传 `variant_id` 时返回该商品全部在售规格的库存。
+        错误：`400 缺少商品 id`；`404 商品不存在或未开放 API 销售`。
+      operationId: getGoodsStock
+      security:
+        - BearerAuth: []
+        - ApiKeyHeader: []
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: 商品 ID（必填，整数）
+          schema:
+            type: integer
+          example: 1
+        - name: variant_id
+          in: query
+          required: false
+          description: 规格 ID（可选，只查某个规格）
+          schema:
+            type: integer
+          example: 10
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/StockData'
+              example:
+                code: 200
+                msg: ok
+                data:
+                  goods_id: 1
+                  skus:
+                    - variant_id: 10
+                      sku_code: v10
+                      name: 月卡
+                      stock_quantity: 42
+                      stock_status: in_stock
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ------------------------------------------------------------------
+  # 5. 创建采购单（下单）
+  # ------------------------------------------------------------------
+  /api/open/v1/order/create:
+    post:
+      tags: [订单]
+      summary: 创建采购单（余额支付，自动发货商品直接返回卡密）
+      description: |
+        需要 scopes：`order:write`。Content-Type: application/json。
+
+        处理流程：库存预检 → 计价（price_mode 决定会员价 / 挂牌价，含批发档位）→
+        余额校验 → 自动发货抢占卡密 → 原子扣减余额 → 落单。
+
+        幂等：同一 API Key 下相同 `out_trade_no` 重复请求直接返回已有订单，
+        响应中带 `"idempotent": true`（此时不含 unit_price / quantity / fulfillment_type / cards 字段）。
+
+        若传 `notify_url` 且凭证未禁用回调（allow_callback != 0），发货后会异步 POST 回调
+        （dujiao-next 协议，失败退避重试 3 次），回调签名串为
+        `"POST\n/api/v1/upstream/callback\n{timestamp}\n{md5hex(body)}"`。
+
+        错误码：
+        - 400 `请求体必须是 JSON` / `goods_id 与 variant_id 必填` / `num 必须是 1-200 的整数` /
+          `计价结果非法，请联系管理员` / `链路过深，检测到可能的循环调用`
+        - 402 `余额不足，当前余额 X，需 Y` / `余额不足，扣款失败`
+        - 404 `商品不存在、已下架或未开放 API 销售` / `规格不存在或已停售`
+        - 409 `库存不足，当前可用 N` / `库存不足` / `库存竞争失败，请重试`
+      operationId: createOrder
+      security:
+        - BearerAuth: []
+        - ApiKeyHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCreateRequest'
+            example:
+              goods_id: 1
+              variant_id: 10
+              num: 1
+              out_trade_no: '20261004142500001'
+              notify_url: 'https://your-server.example/notify'
+              trace_id: 'trace-abc-001'
+      responses:
+        '200':
+          description: 下单成功（或幂等命中返回已有订单）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: '#/components/schemas/OrderCreateResult'
+                          - $ref: '#/components/schemas/OrderIdempotentResult'
+              examples:
+                新单成功:
+                  summary: 新创建订单（自动发货）
+                  value:
+                    code: 200
+                    msg: ok
+                    data:
+                      order_id: a1b2c3d4e5f6...
+                      order_no: a1b2c3d4e5f6...
+                      out_trade_no: '20261004142500001'
+                      status: delivered
+                      amount: '9.90'
+                      unit_price: '9.90'
+                      quantity: 1
+                      currency: CNY
+                      fulfillment_type: auto
+                      cards:
+                        - '卡密内容1'
+                幂等命中:
+                  summary: 相同 out_trade_no 重复请求
+                  value:
+                    code: 200
+                    msg: ok
+                    data:
+                      order_id: a1b2c3d4e5f6...
+                      order_no: a1b2c3d4e5f6...
+                      out_trade_no: '20261004142500001'
+                      status: delivered
+                      amount: '9.90'
+                      currency: CNY
+                      idempotent: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ------------------------------------------------------------------
+  # 6. 订单查询
+  # ------------------------------------------------------------------
+  /api/open/v1/order/query:
+    get:
+      tags: [订单]
+      summary: 按 out_trade_no 或 order_id 查询订单（含卡密）
+      description: |
+        需要 scopes：`order:read`。
+        `order_id` 与 `out_trade_no` 至少填一个（同时填写时以 `order_id` 为准）。
+        只能查询本 API Key 创建的订单。
+        错误：`400 order_id 与 out_trade_no 至少填一个`；`404 订单不存在`。
+      operationId: queryOrder
+      security:
+        - BearerAuth: []
+        - ApiKeyHeader: []
+      parameters:
+        - name: order_id
+          in: query
+          required: false
+          description: 本站订单 ID（下单接口返回的 order_id）
+          schema:
+            type: string
+          example: a1b2c3d4e5f6...
+        - name: out_trade_no
+          in: query
+          required: false
+          description: 商户外部单号（下单时传入的 out_trade_no）
+          schema:
+            type: string
+            maxLength: 64
+          example: '20261004142500001'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/OrderQueryData'
+              example:
+                code: 200
+                msg: ok
+                data:
+                  order_id: a1b2c3d4e5f6...
+                  order_no: a1b2c3d4e5f6...
+                  out_trade_no: '20261004142500001'
+                  status: delivered
+                  amount: '9.90'
+                  currency: CNY
+                  quantity: 1
+                  cards:
+                    - '卡密内容1'
+                  created_at: 1759472700
+                  paid_at: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ------------------------------------------------------------------
+  # 7. 取消订单
+  # ------------------------------------------------------------------
+  /api/open/v1/order/cancel:
+    post:
+      tags: [订单]
+      summary: 取消订单（仅未发货/未支付状态可取消，自动退回余额并释放卡密）
+      description: |
+        需要 scopes：`order:read`。Content-Type: application/json。
+        只能取消本 API Key 创建、且 `status=0`（pending）的订单；
+        取消后自动退回订单金额到余额、释放已占用卡密、订单状态置为 canceled。
+        错误：`400 请求体必须是 JSON`；`404 订单不存在`；`409 订单已支付/已发货，无法取消`。
+      operationId: cancelOrder
+      security:
+        - BearerAuth: []
+        - ApiKeyHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCancelRequest'
+            example:
+              order_id: a1b2c3d4e5f6...
+      responses:
+        '200':
+          description: 取消成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/OkEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/OrderCancelData'
+              example:
+                code: 200
+                msg: ok
+                data:
+                  order_id: a1b2c3d4e5f6...
+                  status: canceled
+                  refunded: '9.90'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+# =====================================================================
+# 组件定义
+# =====================================================================
+components:
+  # ------------------- 鉴权方案 -------------------
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        简单模式：`Authorization: Bearer <api_key>`。
+        如需防重放，可另加严格模式请求头（见 X-Api-Timestamp / X-Api-Signature 参数）。
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: '与 BearerAuth 等价的另一种传法：`X-Api-Key: <api_key>`。'
+
+  # ------------------- 公共请求头（严格模式，可选） -------------------
+  parameters:
+    XApiTimestamp:
+      name: X-Api-Timestamp
+      in: header
+      required: false
+      description: |
+        严格模式：Unix 秒级时间戳，与服务端时间允许偏差 ±60 秒。
+        一旦提供本头或 X-Api-Signature，两者必须同时提供。
+      schema:
+        type: string
+      example: '1759472700'
+    XApiSignature:
+      name: X-Api-Signature
+      in: header
+      required: false
+      description: |
+        严格模式：`hex(HMAC-SHA256(api_secret, "{METHOD}\n{path}\n{timestamp}\n{sha256hex(body)}"))`，
+        小写十六进制。path 不含 query string；GET / 空 body 的 `sha256hex("")` =
+        `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`。
+      schema:
+        type: string
+      example: 3a7f...（64 位十六进制）
+
+  # ------------------- 公共错误响应 -------------------
+  responses:
+    BadRequest:
+      description: |
+        400 参数错误。常见 msg：
+        `缺少商品 id` / `请求体必须是 JSON` / `goods_id 与 variant_id 必填` /
+        `num 必须是 1-200 的整数` / `计价结果非法，请联系管理员` /
+        `order_id 与 out_trade_no 至少填一个` / `链路过深，检测到可能的循环调用`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 400
+            msg: 缺少商品 id
+            data: null
+    Unauthorized:
+      description: |
+        401 鉴权失败。常见 msg：
+        `缺少 API Key（请用 Authorization: Bearer <key> 或 X-Api-Key 头）` / `API Key 不存在` /
+        `签名校验需要同时提供 X-Api-Timestamp 与 X-Api-Signature` / `时间戳格式不正确` /
+        `时间戳已过期（允许偏差 ±60 秒）` / `签名校验失败`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 401
+            msg: API Key 不存在
+            data: null
+    PaymentRequired:
+      description: |
+        402 余额不足（order/create 专属）。常见 msg：
+        `余额不足，当前余额 X，需 Y` / `余额不足，扣款失败`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 402
+            msg: 余额不足，当前余额 0.00，需 9.90
+            data: null
+    Forbidden:
+      description: |
+        403 无权限。常见 msg：
+        `API Key 已被禁用或未通过审核` / `会员不存在` / `会员账户已被冻结` /
+        `api key 无权执行此操作（scopes 未授予）`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 403
+            msg: api key 无权执行此操作（scopes 未授予）
+            data: null
+    NotFound:
+      description: |
+        404 资源不存在。常见 msg：
+        `商品不存在或未开放 API 销售` / `商品不存在、已下架或未开放 API 销售` /
+        `规格不存在或已停售` / `订单不存在` / `接口不存在`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 404
+            msg: 订单不存在
+            data: null
+    Conflict:
+      description: |
+        409 状态冲突（order/create、order/cancel 专属）。常见 msg：
+        `库存不足，当前可用 N` / `库存不足` / `库存竞争失败，请重试` /
+        `订单已支付/已发货，无法取消`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 409
+            msg: 库存不足，当前可用 0
+            data: null
+    TooManyRequests:
+      description: 429 触发限流（每 API Key 默认 60 次/分钟），body 额外包含 `retry_after`（秒）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 429
+            msg: 请求过于频繁，请稍后重试
+            data: null
+            retry_after: 37
+
+  # ------------------- 数据结构 -------------------
+  schemas:
+    # ---- 封套 ----
+    OkEnvelope:
+      type: object
+      description: 成功封套（HTTP 200）
+      required: [code, msg, data]
+      properties:
+        code:
+          type: integer
+          description: 业务码，成功固定 200
+          example: 200
+        msg:
+          type: string
+          description: 结果说明，成功固定 "ok"
+          example: ok
+        data:
+          type: object
+          nullable: true
+          description: 业务数据（各端点结构见对应 schema）
+    ErrorEnvelope:
+      type: object
+      description: 错误封套（HTTP 状态码 = code）
+      required: [code, msg, data]
+      properties:
+        code:
+          type: integer
+          description: 业务码，与 HTTP 状态码一致
+          example: 404
+        msg:
+          type: string
+          description: 错误说明（中文）
+          example: 订单不存在
+        data:
+          type: object
+          nullable: true
+          description: 错误时恒为 null
+        retry_after:
+          type: integer
+          description: 仅 429 限流时返回，建议等待秒数
+          example: 37
+
+    # ---- 金额统一为 2 位小数字符串 ----
+    MoneyString:
+      type: string
+      description: 金额，保留 2 位小数的字符串
+      example: '9.90'
+
+    # ---- 商品 ----
+    WholesalePrice:
+      type: object
+      description: 批发档位
+      properties:
+        qty:
+          type: integer
+          description: 起批数量
+          example: 10
+        price:
+          $ref: '#/components/schemas/MoneyString'
+    Sku:
+      type: object
+      description: 商品规格（SKU）
+      properties:
+        id:
+          type: integer
+          description: 规格 ID
+          example: 10
+        sku_code:
+          type: string
+          description: 规格编码，固定为 "v" + 规格 ID
+          example: v10
+        name:
+          type: string
+          description: 规格名称
+          example: 月卡
+        price_amount:
+          $ref: '#/components/schemas/MoneyString'
+        original_price:
+          $ref: '#/components/schemas/MoneyString'
+        wholesale_prices:
+          type: array
+          description: 批发价档位（按 qty 排列，无则为空数组）
+          items:
+            $ref: '#/components/schemas/WholesalePrice'
+        stock_quantity:
+          type: integer
+          description: 可用库存（自动发货 = 未售卡密数；手动发货 = 规格 stock）
+          example: 42
+        stock_status:
+          type: string
+          description: 库存状态
+          enum: [in_stock, out_of_stock]
+        is_active:
+          type: boolean
+          description: 规格是否在售
+        auto_delivery:
+          type: integer
+          description: 是否自动发货（1 = 自动发卡密，0 = 手动）
+          enum: [0, 1]
+    Goods:
+      type: object
+      description: 对外商品结构
+      properties:
+        id:
+          type: integer
+          description: 商品 ID
+          example: 1
+        category_id:
+          type: integer
+          description: 分类 ID
+          example: 3
+        name:
+          type: string
+          description: 商品名称
+          example: 示例商品
+        description:
+          type: string
+          description: 商品描述（已去除 HTML 标签，截断至 500 字符）
+          example: 这是商品描述
+        image_url:
+          type: string
+          description: 主图 URL（无则为空字符串）
+          example: ''
+        tags:
+          type: string
+          description: 标签（原样返回，无则为空字符串）
+          example: ''
+        price_amount:
+          $ref: '#/components/schemas/MoneyString'
+        currency:
+          type: string
+          description: 币种，固定 CNY
+          example: CNY
+        fulfillment_type:
+          type: string
+          description: 发货方式（按第一个规格判断）
+          enum: [auto, manual]
+        is_active:
+          type: boolean
+          description: 商品是否上架
+        skus:
+          type: array
+          description: 在售规格列表（active=1，按 sort 降序、id 升序）
+          items:
+            $ref: '#/components/schemas/Sku'
+    GoodsListData:
+      type: object
+      properties:
+        total:
+          type: integer
+          description: 符合条件的商品总数
+          example: 25
+        page:
+          type: integer
+          description: 当前页码
+          example: 1
+        page_size:
+          type: integer
+          description: 每页条数
+          example: 20
+        items:
+          type: array
+          description: 商品列表
+          items:
+            $ref: '#/components/schemas/Goods'
+
+    # ---- 库存 ----
+    StockSku:
+      type: object
+      properties:
+        variant_id:
+          type: integer
+          description: 规格 ID
+          example: 10
+        sku_code:
+          type: string
+          description: 规格编码，"v" + 规格 ID
+          example: v10
+        name:
+          type: string
+          description: 规格名称
+          example: 月卡
+        stock_quantity:
+          type: integer
+          description: 实时可用库存
+          example: 42
+        stock_status:
+          type: string
+          enum: [in_stock, out_of_stock]
+    StockData:
+      type: object
+      properties:
+        goods_id:
+          type: integer
+          description: 商品 ID（原样回传）
+          example: 1
+        skus:
+          type: array
+          description: 各规格实时库存
+          items:
+            $ref: '#/components/schemas/StockSku'
+
+    # ---- 账户 ----
+    BalanceData:
+      type: object
+      properties:
+        user_id:
+          type: integer
+          description: 账户（会员）ID
+          example: 1
+        username:
+          type: string
+          description: 用户名（无则回退邮箱）
+          example: demo@example.com
+        balance:
+          $ref: '#/components/schemas/MoneyString'
+        currency:
+          type: string
+          example: CNY
+        member_level:
+          type: integer
+          description: 会员等级
+          example: 2
+        price_mode:
+          type: string
+          description: 计价口径（member = 会员折扣价，list = 挂牌价）
+          enum: [member, list]
+        api_key:
+          type: string
+          description: 当前 API Key
+          example: sk_xxxxxxxxxxxxxxxx
+
+    # ---- 订单 ----
+    OrderCreateRequest:
+      type: object
+      required: [goods_id, variant_id, num]
+      properties:
+        goods_id:
+          type: integer
+          description: 商品 ID（必填）
+          example: 1
+        variant_id:
+          type: integer
+          description: 规格 ID（必填，必须属于 goods_id）
+          example: 10
+        num:
+          type: integer
+          description: 购买数量（必填，整数 1~200）
+          minimum: 1
+          maximum: 200
+          example: 1
+        out_trade_no:
+          type: string
+          description: 商户外部单号（可选，最长 64 字符；同一 API Key 下重复提交命中幂等）
+          maxLength: 64
+          example: '20261004142500001'
+        notify_url:
+          type: string
+          description: 发货回调地址（可选，最长 500 字符；POST + dujiao-next 签名，失败重试 3 次）
+          maxLength: 500
+          example: 'https://your-server.example/notify'
+        trace_id:
+          type: string
+          description: 透传链路 ID（可选，最长 64 字符，回调时原样带回）
+          maxLength: 64
+          example: trace-abc-001
+    OrderCreateResult:
+      type: object
+      description: 新订单创建成功（余额支付，自动发货直接返回卡密）
+      properties:
+        order_id:
+          type: string
+          description: 本站订单 ID（32 位 uuid，无连字符）
+          example: a1b2c3d4e5f60718293a4b5c6d7e8f90
+        order_no:
+          type: string
+          description: 订单号，与 order_id 相同（兼容发卡平台习惯）
+          example: a1b2c3d4e5f60718293a4b5c6d7e8f90
+        out_trade_no:
+          type: string
+          nullable: true
+          description: 商户外部单号（未传则为 null）
+          example: '20261004142500001'
+        status:
+          type: string
+          description: 订单状态，固定 delivered（下单即扣款发货）
+          enum: [delivered]
+        amount:
+          $ref: '#/components/schemas/MoneyString'
+        unit_price:
+          $ref: '#/components/schemas/MoneyString'
+        quantity:
+          type: integer
+          description: 购买数量
+          example: 1
+        currency:
+          type: string
+          example: CNY
+        fulfillment_type:
+          type: string
+          description: 发货方式
+          enum: [auto, manual]
+        cards:
+          type: array
+          description: 卡密内容列表（仅自动发货返回；手动发货为空数组）
+          items:
+            type: string
+          example: ['卡密内容1']
+    OrderIdempotentResult:
+      type: object
+      description: 幂等命中（相同 out_trade_no 重复请求，返回已有订单）
+      properties:
+        order_id:
+          type: string
+        order_no:
+          type: string
+        out_trade_no:
+          type: string
+          nullable: true
+        status:
+          type: string
+          description: 已有订单状态（1=delivered，0=pending，其他=canceled）
+          enum: [delivered, pending, canceled]
+        amount:
+          $ref: '#/components/schemas/MoneyString'
+        currency:
+          type: string
+          example: CNY
+        idempotent:
+          type: boolean
+          description: 固定 true，标识幂等命中
+          example: true
+    OrderQueryData:
+      type: object
+      properties:
+        order_id:
+          type: string
+        order_no:
+          type: string
+          description: 与 order_id 相同
+        out_trade_no:
+          type: string
+          nullable: true
+        status:
+          type: string
+          description: 订单状态（1=delivered，0=pending，其他=canceled）
+          enum: [delivered, pending, canceled]
+        amount:
+          $ref: '#/components/schemas/MoneyString'
+        currency:
+          type: string
+          example: CNY
+        quantity:
+          type: integer
+          description: 购买数量
+          example: 1
+        cards:
+          type: array
+          description: 卡密内容列表
+          items:
+            type: string
+        created_at:
+          type: integer
+          description: 下单时间（Unix 秒级时间戳）
+          example: 1759472700
+        paid_at:
+          type: integer
+          nullable: true
+          description: 支付时间（Unix 秒级时间戳，未记录则为 null）
+    OrderCancelRequest:
+      type: object
+      required: [order_id]
+      properties:
+        order_id:
+          type: string
+          description: 要取消的订单 ID（必填）
+          example: a1b2c3d4e5f60718293a4b5c6d7e8f90
+    OrderCancelData:
+      type: object
+      properties:
+        order_id:
+          type: string
+          description: 被取消的订单 ID
+        status:
+          type: string
+          description: 固定 canceled
+          enum: [canceled]
+        refunded:
+          $ref: '#/components/schemas/MoneyString'
