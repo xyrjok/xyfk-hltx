@@ -1546,10 +1546,7 @@ const genHex = (bytes) => Array.from(crypto.getRandomValues(new Uint8Array(bytes
 const genApiKey = () => genHex(16);     // 32 hex
 const genApiSecret = () => genHex(32);  // 64 hex
 
-const sha256Hex = async (str) => {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-};
+// (已移除重复的 sha256Hex 定义，复用上方的 async function sha256Hex)
 
 // HMAC-SHA256 签名（开放 API 严格模式）
 // sign_string = "{method}\n{path}\n{timestamp}\n{sha256hex(body)}"
