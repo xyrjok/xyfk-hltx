@@ -408,7 +408,8 @@
                         <div class="col-md-3">
                             <label class="form-label small">计价口径</label>
                             <select class="form-select form-select-sm" id="apikey-pricemode">
-                                <option value="member">会员折扣价（推荐）</option>
+                                <option value="member">会员折扣价（与批发价取低）</option>
+                                <option value="fixed_member">固定会员价（忽略批发档，对接推荐）</option>
                                 <option value="list">挂牌价（不打折）</option>
                             </select>
                         </div>

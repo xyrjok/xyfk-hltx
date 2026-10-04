@@ -190,7 +190,16 @@ interface Ship { delivery(): string; stock(): int|string; hasEnoughStock(int $qu
 
 由 API Key 的 `price_mode` 决定：
 - `member`（默认）= 会员折扣价，与前台会员价**同口径**，含「与批发价取低者」规则
+- `fixed_member` = 固定会员价：忽略批发档位，单价仅由会员折扣决定、与数量无关（对接平台/下游供货推荐）
 - `list` = 挂牌价，不打折
+
+**商品/规格报价字段语义**（与 dujiao-next 官方供货实现 `toUpstreamProductWithMemberPrice` 一致）：
+- `price_amount` = 调用方**实付单价**（已含该会员折扣；买 1 件口径，`fixed_member` 下任意数量同价）
+- `original_price` = 挂牌原价
+- `member_price` = 会员折扣价（无折扣时不返回）
+
+下游按 `price_amount` 记成本即与实际扣款对账一致。`member` 模式下批量命中批发档时实付可更低；
+需要成本恒等就用 `fixed_member`。
 
 ---
 

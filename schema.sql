@@ -269,7 +269,7 @@ CREATE TABLE IF NOT EXISTS api_credentials (
     reject_reason TEXT,
     scopes TEXT DEFAULT '',
     rate_limit_per_min INTEGER DEFAULT 60,
-    price_mode TEXT DEFAULT 'member',
+    price_mode TEXT DEFAULT 'member', -- member=会员折扣价(与批发价取低) / fixed_member=固定会员价(忽略批发档) / list=挂牌价
     allow_callback INTEGER DEFAULT 1,
     callback_whitelist TEXT,
     last_used_at INTEGER,

@@ -1767,9 +1767,11 @@ async function apiAuth(request, env, db, pathForSign) {
 }
 
 // [v2] API 计价：price_mode 决定口径
-//   member（默认）= 会员折扣价，与前台会员价同一口径（含「与批发价取低者」规则）
-//   list           = 挂牌价，不打折
-async function apiUnitPrice(db, auth, variant, product, quantity) {
+//   member（默认）   = 会员折扣价，与前台会员价同一口径（含「与批发价取低者」规则）
+//   fixed_member     = 固定会员价：忽略批发档位，单价仅由会员折扣决定、与数量无关（对接平台/下游供货推荐）
+//   list             = 挂牌价，不打折
+// preDiscount（可选）= 预解析好的会员折扣（1..100），批量报价时传入可省去逐 SKU 查库
+async function apiUnitPrice(db, auth, variant, product, quantity, preDiscount) {
     const base = parseFloat(variant.price) || 0;
     let listPrice = base;
     // 批发档位（与下单主逻辑同口径：按 qty 降序命中）
@@ -1786,8 +1788,14 @@ async function apiUnitPrice(db, auth, variant, product, quantity) {
     }
     const priceMode = (auth.cred && auth.cred.price_mode) || 'member';
     if (priceMode === 'list') return Math.round(listPrice * 100) / 100;
-    const discount = await resolveMemberDiscount(db, auth.user.member_level);
+    const discount = (preDiscount === undefined || preDiscount === null)
+        ? await resolveMemberDiscount(db, auth.user.member_level) : preDiscount;
     const priceOn = !product || product.member_price_enabled !== 0;
+    // fixed_member = 固定会员价：不看批发档，单价与数量无关，便于下游成本同步/对账恒等
+    if (priceMode === 'fixed_member') {
+        if (discount < 100 && priceOn) return Math.round((base * discount / 100) * 100) / 100;
+        return Math.round(base * 100) / 100;
+    }
     if (discount < 100 && priceOn) {
         return Math.round(Math.min(listPrice, base * discount / 100) * 100) / 100;
     }
@@ -2040,6 +2048,8 @@ async function handleApi(request, env, url, ctx) {
             }
             const uid = ua.user.id;
             const uname = ua.user.username || ua.user.email || ('user_' + uid);
+            // [v3++] 会员折扣每请求只解析一次（upSku 报价与下单计价共用，避免逐 SKU 多一次 D1 查询）
+            const _upDiscount = await resolveMemberDiscount(db, ua.user.member_level);
 
             // 协议内统一的库存计算
             const upStockOf = async (variant) => {
@@ -2049,18 +2059,27 @@ async function handleApi(request, env, url, ctx) {
                 }
                 return parseInt(variant.stock) || 0;
             };
-            const upSku = async (v) => {
+            const upSku = async (v, p) => {
                 const stock = await upStockOf(v);
                 let wc = null;
                 if (v.wholesale_config) {
                     try { wc = typeof v.wholesale_config === 'string' ? JSON.parse(v.wholesale_config) : v.wholesale_config; } catch(e) { wc = null; }
                 }
+                // [v3++] 报价语义对齐 dujiao-next 官方供货实现（toUpstreamProductWithMemberPrice）：
+                //        price_amount = 调用方会员实付单价（买 1 件口径，fixed_member 下任意数量同价），
+                //        original_price = 挂牌原价，member_price = 会员折扣价（无折扣不返回）。
+                //        下游按 price_amount 记成本即与实际扣款一致，不再“成本虚高、利润被低估”。
+                const base = parseFloat(v.price) || 0;
+                const priceOn = !p || p.member_price_enabled !== 0;
+                const disc = priceOn ? _upDiscount : 100;
+                const unit = await apiUnitPrice(db, ua, v, { member_price_enabled: p ? p.member_price_enabled : undefined }, 1, _upDiscount);
                 return {
                     id: v.id,
                     sku_code: 'v' + v.id,
                     spec_values: jsonmap(v.name),
-                    price_amount: (parseFloat(v.price) || 0).toFixed(2),
-                    original_price: (parseFloat(v.price) || 0).toFixed(2),
+                    price_amount: unit.toFixed(2),
+                    original_price: base.toFixed(2),
+                    member_price: disc < 100 ? (Math.round((base * disc / 100) * 100) / 100).toFixed(2) : undefined,
                     wholesale_prices: Array.isArray(wc) ? wc.map(r => ({ qty: parseInt(r.qty) || 0, price: (parseFloat(r.price) || 0).toFixed(2) })) : [],
                     stock_status: stock > 0 ? 'in_stock' : 'out_of_stock',
                     stock_quantity: stock,
@@ -2069,8 +2088,12 @@ async function handleApi(request, env, url, ctx) {
             };
             const upProduct = async (p, vars) => {
                 const skus = [];
-                for (const v of vars) skus.push(await upSku(v));
-                const price = skus.length ? skus.map(s => parseFloat(s.price_amount)).sort((a, b) => a - b)[0].toFixed(2) : '0.00';
+                for (const v of vars) skus.push(await upSku(v, p));
+                // 商品级报价 = 最低 SKU 价（口径与 SKU 一致：实付价 / 原价 / 会员价）
+                const minOf = (key) => {
+                    const vals = skus.map(s => parseFloat(s[key])).filter(x => !isNaN(x));
+                    return vals.length ? vals.sort((a, b) => a - b)[0].toFixed(2) : '0.00';
+                };
                 return {
                     id: p.id,
                     seo_meta: jsonmap(p.seo_description || ''),
@@ -2079,8 +2102,9 @@ async function handleApi(request, env, url, ctx) {
                     content: jsonmap(''),
                     images: p.image_url ? [p.image_url] : [],
                     tags: (p.tags || '').split(/[,，\s]+/).filter(Boolean),
-                    price_amount: price,
-                    original_price: price,
+                    price_amount: minOf('price_amount'),
+                    original_price: minOf('original_price'),
+                    member_price: skus.some(s => s.member_price) ? minOf('member_price') : undefined,
                     currency: 'CNY',
                     fulfillment_type: (vars[0] && vars[0].auto_delivery === 1) ? 'auto' : 'manual',
                     manual_form_schema: {},
@@ -4411,7 +4435,7 @@ async function handleApi(request, env, url, ctx) {
                 const nextRate = rate_limit_per_min !== undefined ? (parseInt(rate_limit_per_min) || 0) : cred.rate_limit_per_min;
                 if (nextRate < 0 || nextRate > 10000) return errRes('限流需在 0-10000 之间（0 = 不限）');
                 const nextMode = price_mode !== undefined ? String(price_mode) : (cred.price_mode || 'member');
-                if (!['member', 'list'].includes(nextMode)) return errRes('price_mode 只支持 member / list');
+                if (!['member', 'fixed_member', 'list'].includes(nextMode)) return errRes('price_mode 只支持 member / fixed_member / list');
                 const nextCb = (allow_callback === undefined) ? cred.allow_callback : (allow_callback ? 1 : 0);
                 let nextWl = cred.callback_whitelist;
                 if (callback_whitelist !== undefined) {
