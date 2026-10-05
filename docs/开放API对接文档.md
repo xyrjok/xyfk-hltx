@@ -2,8 +2,8 @@
 
 本项目同时作为**上游供货商**对外供货，兼容三种协议。所有商品需在「商品管理」里勾选
 **「开放 API 销售」**（`products.api_enabled=1`）才会对外可见可购。
-另内置**采购方适配器**（dujiao-next 协议），可直接把另一个本站（或 dujiao-next）当上游做代销/补货，
-即「本项目对接本项目」开箱即用 —— 详见第八章。
+另内置**采购方适配器**（dujiao-next / acg-faka / open-v1 三种协议），可直接把另一个本站、dujiao-next
+或 acg-faka 实例当上游做代销/补货，即「本项目对接本项目」开箱即用 —— 详见第八章。
 
 ---
 
@@ -255,8 +255,17 @@ interface Ship { delivery(): string; stock(): int|string; hasEnoughStock(int $qu
    B 站会员 API Key = 供货凭据；该会员余额 = 采购资金池
 ```
 
-> 采购方客户端目前只支持 `dujiao-next` 协议；`open-v1` / `acg-faka` 协议连接请手动维护。
-> 站与站之间也可混合：任意一侧换成 dujiao-next 实例同样适用。
+> 采购方客户端支持 `dujiao-next` / `acg-faka` / `open-v1` 三种协议（sync + purchase 全自动）；
+> `mcy-shop` 作为上游依赖其第三方货源插件（SharedStock / open-api，无稳定公开契约），请手动维护。
+> 站与站之间也可混合：任意一侧换成 dujiao-next / acg-faka 实例同样适用。
+
+三种采购协议的连接配置差异：
+
+| `protocol` | 上游系统 | `api_key` / `api_secret` 含义 | 同步入口 | 采购入口 |
+|---|---|---|---|---|
+| `dujiao-next`（默认） | dujiao-next、本项目 | 上游会员 API Key / Secret（HMAC-SHA256 签名） | `/api/v1/upstream/products` | `/api/v1/upstream/orders` + 查单取卡 |
+| `acg-faka` | acg-faka 3.1.2+ | 上游会员 ID（app_id）/ app_key（MD5 易支付签名） | `/shared/commodity/items` | `/shared/commodity/trade`（直接回卡密） |
+| `open-v1` | 本项目 | 上游会员 API Key（Bearer），`api_secret` 留空 | `/api/open/v1/goods/list` | `/api/open/v1/order/create`（直接回卡密） |
 
 ### 8.1 上游站（B 站）准备
 
@@ -288,7 +297,7 @@ curl -X POST https://a.example.com/api/admin/upstream/connection/save \\
   }'
 ```
 
-- `protocol` 可省略（默认 `dujiao-next`）；更新已有连接传 `id`
+- `protocol` 可省略（默认 `dujiao-next`）；支持 `dujiao-next` / `acg-faka` / `open-v1`（含义见上方协议表）；更新已有连接传 `id`
 - ⚠️ **自环防护**：把本站自己的地址配成上游会被直接拒绝（防无限递归下单）；
   内网/回环地址同样拒绝（SSRF 防护）。A→B→A 的环路由链式深度守卫兜底
   （出站带 `X-XYFK-Chain-Depth`，≥ 3 拒单）
@@ -356,7 +365,7 @@ curl -X POST https://a.example.com/api/admin/upstream/purchase \\
 |---|---|
 | ping 报 `invalid_api_key` | 上游 key 未 approved / 未启用 / 抄错 |
 | ping 报 `user_disabled` | 上游会员被冻结，去上游解冻 |
-| sync 报「采购方客户端目前只支持 dujiao-next 协议」 | 连接 protocol 不对；重新 save 时显式传 `"protocol": "dujiao-next"` |
+| sync 报「协议 xxx 暂不支持自动同步」 | 该协议未实现自动同步（如 mcy-shop）；重新 save 时换成 `dujiao-next` / `acg-faka` / `open-v1`，或手动维护商品 |
 | 下单报 `payment_failed` | 上游会员余额不足，去上游充值 |
 | 下单报 `sku_unavailable` | 上游无货 / 商品未勾「开放 API 销售」/ 规格下架 |
 | purchase 报「该本地规格未绑定上游 SKU」 | 该规格不是 sync 建的，先执行 sync |

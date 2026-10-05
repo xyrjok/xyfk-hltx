@@ -1367,6 +1367,161 @@ async function upstreamSignedFetch(conn, method, apiPath, bodyObj) {
     return { status: resp.status, ok: resp.ok, data };
 }
 
+// ===================== [v4] 采购方适配器扩展：acg-faka / open-v1 出站调用 =====================
+// SKU 显示名：dujiao-next 的 SKU 结构没有 name 字段（规范名在 spec_values jsonmap），
+// 兼容 spec_values / sku_code / name 三种来源。
+function upstreamSkuTitle(it, sk) {
+    const sv = sk && sk.spec_values;
+    const specName = (typeof sv === 'string') ? sv
+        : (sv && typeof sv === 'object' && !Array.isArray(sv) && (sv.zh_CN || Object.values(sv)[0])) || '';
+    return String(specName || (sk && sk.sku_code) || (sk && sk.name) || '');
+}
+
+// acg-faka 协议(/shared/*)出站调用：POST 表单 app_id + app_key + sign。
+// 鉴权照抄 acg-faka app/Service/Bind/Shared.php::request()：sign = Str::generateSignature(data, appKey)
+// = acgSign（与本站 /shared/* 服务端验签同一算法）；封套 {code:200,msg,data}，非 200 视为失败。
+async function acgUpstreamFetch(conn, apiPath, form) {
+    const body = Object.assign({}, form || {}, {
+        app_id: String(conn.api_key || ''),
+        app_key: String(conn.api_secret || '')
+    });
+    body.sign = acgSign(body, String(conn.api_secret || ''));
+    let depth = 0;
+    try { depth = parseInt(conn._chain_depth) || 0; } catch (e) {}
+    const url = String(conn.base_url || '').replace(/\/+$/, '') + apiPath;
+    const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-XYFK-Chain-Depth': String(depth + 1)
+        },
+        body: new URLSearchParams(body).toString()
+    });
+    let env = null;
+    try { env = await resp.json(); } catch (e) {}
+    return {
+        status: resp.status,
+        ok: resp.status === 200 && !!env && Number(env.code) === 200,
+        data: env ? env.data : null,
+        msg: (env && env.msg) || ('HTTP ' + resp.status)
+    };
+}
+
+// open-v1 通用协议出站调用：Authorization: Bearer api_key；封套 {code:200,msg,data}。
+async function openUpstreamFetch(conn, apiPath, bodyObj) {
+    let depth = 0;
+    try { depth = parseInt(conn._chain_depth) || 0; } catch (e) {}
+    const url = String(conn.base_url || '').replace(/\/+$/, '') + apiPath;
+    const resp = await fetch(url, {
+        method: bodyObj ? 'POST' : 'GET',
+        headers: Object.assign({
+            'Authorization': 'Bearer ' + String(conn.api_key || ''),
+            'X-XYFK-Chain-Depth': String(depth + 1)
+        }, bodyObj ? { 'Content-Type': 'application/json' } : {}),
+        body: bodyObj ? JSON.stringify(bodyObj) : undefined
+    });
+    let env = null;
+    try { env = await resp.json(); } catch (e) {}
+    return {
+        status: resp.status,
+        ok: resp.status === 200 && !!env && Number(env.code) === 200,
+        data: env ? env.data : null,
+        msg: (env && env.msg) || ('HTTP ' + resp.status)
+    };
+}
+
+// acg-faka config 是 INI 文本（自研 Ini 解析器）：[category]=规格名 / [shared_mapping]=规格id / [category_factory]=拿货价
+function acgParseIni(text) {
+    const out = {};
+    let node = '';
+    for (const raw of String(text || '').split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line || line.charAt(0) === ';' || line.charAt(0) === '#') continue;
+        const m = line.match(/^\[([\s\S]*)\]$/);
+        if (m) { node = m[1]; out[node] = out[node] || {}; continue; }
+        const i = line.indexOf('=');
+        if (i < 0 || !node) continue;
+        out[node][line.substring(0, i).trim()] = line.substring(i + 1).trim();
+    }
+    return out;
+}
+
+// 上游 SKU 落库：建/更新本地商品+规格+映射（acg-faka / open-v1 共用）
+async function upsertUpstreamSku(db, conn, row, extSku, upProduct, name, price, stock) {
+    const map = await db.prepare('SELECT * FROM upstream_items WHERE connection_id=? AND upstream_sku_id=?').bind(conn.id, extSku).first();
+    const now = time();
+    if (map && map.local_variant_id) {
+        await db.prepare('UPDATE upstream_items SET name=?, price=?, stock=?, upstream_product_id=?, updated_at=? WHERE id=?')
+            .bind(name, price, stock, String(upProduct), now, map.id).run();
+        row.updated++;
+    } else {
+        const prodIns = await db.prepare('INSERT INTO products (category_id, name, description, sort, active, created_at, updated_at, member_price_enabled, api_enabled) VALUES (1, ?, ?, 0, 1, ?, ?, 1, 0)')
+            .bind(name, '[上游代销] ' + name, now, now).run();
+        const varIns = await db.prepare('INSERT INTO variants (product_id, name, price, stock, auto_delivery, created_at, updated_at, active) VALUES (?, ?, ?, 0, 1, ?, ?, 1)')
+            .bind(prodIns.meta.last_row_id, name, price, now, now).run();
+        await db.prepare('INSERT INTO upstream_items (connection_id, upstream_product_id, upstream_sku_id, local_product_id, local_variant_id, name, price, stock, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            .bind(conn.id, String(upProduct), extSku, prodIns.meta.last_row_id, varIns.meta.last_row_id, name, price, stock, now, now).run();
+        row.created++;
+    }
+}
+
+// acg-faka 采购方同步：POST /shared/commodity/items → 分类树 [{id,name,...,children:[商品行]}]。
+// 商品行字段 = SharedPayload::COMMODITY_FIELDS；多规格靠 config INI 的 shared_mapping（race→规格id）。
+// upstream_sku_id 存「code#race」（单规格存「code#-」），purchase 时拆回 shared_code + race。
+async function acgUpstreamSync(db, conn, row) {
+    const connRes = await acgUpstreamFetch(conn, '/shared/authentication/connect', {});
+    row.ping_ok = !!connRes.ok;
+    if (!row.ping_ok) { row.error = connRes.msg || 'connect 失败'; return; }
+    const itemsRes = await acgUpstreamFetch(conn, '/shared/commodity/items', {});
+    if (!itemsRes.ok) { row.error = itemsRes.msg || 'items 失败'; return; }
+    const cats = Array.isArray(itemsRes.data) ? itemsRes.data : [];
+    for (const cat of cats) {
+        const list = (cat && Array.isArray(cat.children)) ? cat.children : [];
+        for (const g of list) {
+            row.products++;
+            const code = String(g.code || g.id || '');
+            const ini = acgParseIni(g.config || '');
+            const mapping = ini.shared_mapping || {};
+            const raceNames = ini.category || {};
+            const factory = ini.category_factory || {};
+            const races = Object.keys(mapping);
+            const skus = races.length
+                ? races.map(k => ({ key: code + '#' + k, name: String(g.name) + ' / ' + (raceNames[k] || k), price: parseFloat(factory[k]) || parseFloat(g.user_price) || 0 }))
+                : [{ key: code + '#-', name: String(g.name || ('上游商品 ' + code)), price: parseFloat(g.user_price) || 0 }];
+            for (const sk of skus) {
+                row.skus++;
+                await upsertUpstreamSku(db, conn, row, sk.key, code, sk.name, sk.price, parseInt(g.stock) || 0);
+            }
+        }
+    }
+}
+
+// open-v1 采购方同步：GET /api/open/v1/goods/list（分页）→ {total,page,page_size,items:[goods]}。
+// upstream_sku_id = sku.id（规格 id），purchase 走 order/create 直接回卡密。
+async function openUpstreamSync(db, conn, row) {
+    const bal = await openUpstreamFetch(conn, '/api/open/v1/balance', null);
+    row.ping_ok = !!bal.ok;
+    if (!row.ping_ok) { row.error = bal.msg || 'balance 失败'; return; }
+    let page = 1;
+    while (page <= 20) {
+        const r = await openUpstreamFetch(conn, '/api/open/v1/goods/list?page=' + page + '&page_size=100', null);
+        if (!r.ok) { row.error = r.msg || 'goods/list 失败'; return; }
+        const items = (r.data && r.data.items) || [];
+        for (const g of items) {
+            row.products++;
+            const title = String(g.name || ('上游商品 ' + g.id));
+            const skus = Array.isArray(g.skus) ? g.skus : [];
+            for (const sk of skus) {
+                row.skus++;
+                await upsertUpstreamSku(db, conn, row, String(sk.id), String(g.id),
+                    title + ' / ' + (sk.name || sk.sku_code || ''), parseFloat(sk.price_amount) || 0, parseInt(sk.stock_quantity) || 0);
+            }
+        }
+        if (items.length < 100) break;
+        page++;
+    }
+}
+
 // ===================== [v3] dujiao-next 上游供货协议 =====================
 // 协议来源：dujiao-next 内部/upstream/signer.go 与 internal/modules/upstreamapi/transport/http/
 // 严格 1:1 复刻，任何 dujiao-next 实例都能把本站当上游供货商。
@@ -2214,6 +2369,365 @@ async function handleApi(request, env, url, ctx) {
         }
 
         // ===========================
+        // ===========================
+        // --- [v3] dujiao-next 上游供货协议 /api/v1/upstream/* ---
+        // ===========================
+        if (path.startsWith('/api/v1/upstream/')) {
+            const ua = await upstreamAuth(request, env, db);
+            if (!ua.ok) {
+                await logApiCall(db, null, request, ua.status, ua.code);
+                return upErr(ua.status, ua.code, ua.msg);
+            }
+            // [v3+] scopes 权限校验（该 key 未授予所需范围时拒绝）
+            if (!scopeAllows(ua.cred, method, path)) {
+                await logApiCall(db, ua, request, 403, 'insufficient_scope');
+                return upErr(403, 'insufficient_scope', 'api key scope does not allow this operation');
+            }
+            const uid = ua.user.id;
+            const uname = ua.user.username || ua.user.email || ('user_' + uid);
+            // [v3++] 会员折扣每请求只解析一次（upSku 报价与下单计价共用，避免逐 SKU 多一次 D1 查询）
+            const _upDiscount = await resolveMemberDiscount(db, ua.user.member_level);
+
+            // 协议内统一的库存计算
+            const upStockOf = async (variant) => {
+                if (variant.auto_delivery === 1) {
+                    const r = await db.prepare('SELECT COUNT(*) as c FROM cards WHERE variant_id=? AND status=0').bind(variant.id).first();
+                    return r ? (r.c || 0) : 0;
+                }
+                return parseInt(variant.stock) || 0;
+            };
+            const upSku = async (v, p) => {
+                const stock = await upStockOf(v);
+                let wc = null;
+                if (v.wholesale_config) {
+                    try { wc = typeof v.wholesale_config === 'string' ? JSON.parse(v.wholesale_config) : v.wholesale_config; } catch(e) { wc = null; }
+                }
+                // [v3++] 报价语义对齐 dujiao-next 官方供货实现（toUpstreamProductWithMemberPrice）：
+                //        price_amount = 调用方会员实付单价（买 1 件口径，fixed_member 下任意数量同价），
+                //        original_price = 挂牌原价，member_price = 会员折扣价（无折扣不返回）。
+                //        下游按 price_amount 记成本即与实际扣款一致，不再“成本虚高、利润被低估”。
+                const base = parseFloat(v.price) || 0;
+                const priceOn = !p || p.member_price_enabled !== 0;
+                const disc = priceOn ? _upDiscount : 100;
+                const unit = await apiUnitPrice(db, ua, v, { member_price_enabled: p ? p.member_price_enabled : undefined }, 1, _upDiscount);
+                return {
+                    id: v.id,
+                    sku_code: 'v' + v.id,
+                    spec_values: jsonmap(v.name),
+                    price_amount: unit.toFixed(2),
+                    original_price: base.toFixed(2),
+                    member_price: disc < 100 ? (Math.round((base * disc / 100) * 100) / 100).toFixed(2) : undefined,
+                    wholesale_prices: Array.isArray(wc) ? wc.map(r => ({ qty: parseInt(r.qty) || 0, price: (parseFloat(r.price) || 0).toFixed(2) })) : [],
+                    stock_status: stock > 0 ? 'in_stock' : 'out_of_stock',
+                    stock_quantity: stock,
+                    is_active: v.active === 1
+                };
+            };
+            const upProduct = async (p, vars) => {
+                const skus = [];
+                for (const v of vars) skus.push(await upSku(v, p));
+                // 商品级报价 = 最低 SKU 价（口径与 SKU 一致：实付价 / 原价 / 会员价）
+                const minOf = (key) => {
+                    const vals = skus.map(s => parseFloat(s[key])).filter(x => !isNaN(x));
+                    return vals.length ? vals.sort((a, b) => a - b)[0].toFixed(2) : '0.00';
+                };
+                return {
+                    id: p.id,
+                    seo_meta: jsonmap(p.seo_description || ''),
+                    title: jsonmap(p.name),
+                    description: jsonmap((p.description || '').replace(/<[^>]+>/g, '').substring(0, 500)),
+                    content: jsonmap(''),
+                    images: p.image_url ? [p.image_url] : [],
+                    tags: (p.tags || '').split(/[,，\s]+/).filter(Boolean),
+                    price_amount: minOf('price_amount'),
+                    original_price: minOf('original_price'),
+                    member_price: skus.some(s => s.member_price) ? minOf('member_price') : undefined,
+                    currency: 'CNY',
+                    fulfillment_type: (vars[0] && vars[0].auto_delivery === 1) ? 'auto' : 'manual',
+                    manual_form_schema: {},
+                    is_active: p.active === 1 && p.api_enabled === 1,
+                    category_id: p.category_id,
+                    skus,
+                    updated_at: new Date((p.updated_at || p.created_at || 0) * 1000).toISOString()
+                };
+            };
+
+            // ---- POST /api/v1/upstream/ping ----
+            if (path === '/api/v1/upstream/ping' && method === 'POST') {
+                const siteRow = await db.prepare("SELECT value FROM site_config WHERE key='site_name'").first();
+                let memberLevel = null;
+                const lvRow = await db.prepare("SELECT value FROM site_config WHERE key='member_levels'").first();
+                if (lvRow && lvRow.value) {
+                    try {
+                        const levels = JSON.parse(lvRow.value);
+                        const lv = levels && levels[ua.user.member_level || 0];
+                        if (lv) memberLevel = { id: (ua.user.member_level || 0), name: jsonmap(lv.name || ''), slug: 'level_' + (ua.user.member_level || 0), icon: '' };
+                    } catch(e) {}
+                }
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({
+                    ok: true,
+                    site_name: (siteRow && siteRow.value) || 'xyfk',
+                    protocol_version: '1.0',
+                    user_id: uid,
+                    balance: (parseFloat(ua.user.balance) || 0).toFixed(2),
+                    currency: 'CNY',
+                    member_level: memberLevel
+                });
+            }
+
+            // ---- GET /api/v1/upstream/categories ----
+            if (path === '/api/v1/upstream/categories' && method === 'GET') {
+                const rows = (await db.prepare('SELECT * FROM categories ORDER BY sort DESC, id ASC').all()).results || [];
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({ ok: true, categories: rows.map(c => ({
+                    id: c.id, parent_id: 0, slug: 'c' + c.id, name: jsonmap(c.name), icon: c.image_url || '', sort_order: c.sort || 0
+                })) });
+            }
+
+            // ---- GET /api/v1/upstream/products ----
+            const listMatch = path === '/api/v1/upstream/products' && method === 'GET';
+            if (listMatch) {
+                // [v3+] 60s 边缘缓存命中直接返回，不查 D1
+                const _ck = edgeCacheReq(url, ua.cred.api_key);
+                const _hit = await edgeCacheMatch(_ck);
+                if (_hit) { await logApiCall(db, ua, request, 200, 'cache_hit'); return _hit; }
+                const page = Math.max(1, parseInt(url.searchParams.get('page')) || 1);
+                const pageSize = Math.min(100, Math.max(1, parseInt(url.searchParams.get('page_size')) || 20));
+                const includeInactive = url.searchParams.get('include_inactive') === 'true';
+                const updatedAfter = url.searchParams.get('updated_after');
+                let where = 'WHERE api_enabled=1';
+                const binds = [];
+                if (!includeInactive) where += ' AND active=1';
+                if (updatedAfter) {
+                    const ts = Math.floor(new Date(updatedAfter).getTime() / 1000);
+                    if (!isNaN(ts)) {
+                        // [修复] 原条件 `updated_at IS NULL OR ...` 会把所有 updated_at 为 NULL 的历史行
+                        //        无条件当成“已变更”，增量同步永远退化为全量拉取。
+                        //        改为 COALESCE 兑底时间；同时兼容地把「近期变动过的规格」也算进变更集，
+                        //        避免只改规格价/库存时下游拉不到。
+                        where += ` AND (COALESCE(products.updated_at, products.created_at, 0) >= ?
+                                   OR EXISTS (SELECT 1 FROM variants v WHERE v.product_id = products.id
+                                              AND COALESCE(v.updated_at, v.created_at, 0) >= ?))`;
+                        binds.push(ts, ts);
+                    }
+                }
+                const total = (await db.prepare(`SELECT COUNT(*) as c FROM products ${where}`).bind(...binds).first() || {}).c || 0;
+                const rows = (await db.prepare(`SELECT * FROM products ${where} ORDER BY sort DESC, id ASC LIMIT ? OFFSET ?`)
+                    .bind(...binds, pageSize, (page - 1) * pageSize).all()).results || [];
+                const items = [];
+                if (rows.length) {
+                    const ids = rows.map(p => p.id);
+                    const ph = ids.map(() => '?').join(',');
+                    const allVars = (await db.prepare(`SELECT * FROM variants WHERE product_id IN (${ph}) AND active=1 ORDER BY sort DESC, id ASC`).bind(...ids).all()).results || [];
+                    for (const p of rows) items.push(await upProduct(p, allVars.filter(v => v.product_id === p.id)));
+                }
+                await logApiCall(db, ua, request, 200);
+                const _resp = jsonRes({ total, items, includes_inactive: includeInactive });
+                try { ctx.waitUntil(edgeCachePut(_ck, _resp, EDGE_CACHE_TTL_LIST)); } catch (e) {}
+                return _resp;
+            }
+
+            // ---- GET /api/v1/upstream/products/{id} ----
+            const prodMatch = path.match(/^\/api\/v1\/upstream\/products\/(\d+)$/);
+            if (prodMatch && method === 'GET') {
+                const pid = parseInt(prodMatch[1]);
+                const p = await db.prepare('SELECT * FROM products WHERE id=? AND api_enabled=1').bind(pid).first();
+                if (!p) {
+                    await logApiCall(db, ua, request, 404, 'product_deleted');
+                    return upErr(404, 'product_deleted', 'product not found');
+                }
+                const vars = (await db.prepare('SELECT * FROM variants WHERE product_id=? AND active=1 ORDER BY sort DESC, id ASC').bind(pid).all()).results || [];
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({ ok: true, product: await upProduct(p, vars) });
+            }
+
+            // ---- POST /api/v1/upstream/orders ----
+            if (path === '/api/v1/upstream/orders' && method === 'POST') {
+                // [v3] 递归深度守卫：A→B→A→B 无限循环保护
+                if (chainDepth(request) >= CHAIN_DEPTH_LIMIT) {
+                    await logApiCall(db, ua, request, 400, 'chain_depth_exceeded');
+                    return upErr(400, 'bad_request', 'chain depth exceeded: possible upstream loop detected');
+                }
+                let body = {};
+                try { body = await request.json(); } catch(e) {
+                    await logApiCall(db, ua, request, 400, 'bad_request');
+                    return upErr(400, 'bad_request', 'invalid request body');
+                }
+                const skuId = parseInt(body.sku_id);
+                const qty = parseInt(body.quantity) || 0;
+                const dsNo = (body.downstream_order_no || '').toString().trim().substring(0, 64) || null;
+                const traceId = (body.trace_id || '').toString().substring(0, 64) || null;
+                const cbUrl = (body.callback_url || '').toString().trim().substring(0, 500) || null;
+                if (!skuId || qty < 1) {
+                    await logApiCall(db, ua, request, 400, 'bad_request');
+                    return upErr(400, 'bad_request', 'sku_id 与 quantity 必填');
+                }
+                // callback_url SSRF 防护（协议强制要求）
+                if (cbUrl) {
+                    if (!/^https?:\/\//i.test(cbUrl)) {
+                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                        return upErr(400, 'invalid_callback_url', 'callback_url must be http(s)');
+                    }
+                    try {
+                        const cu = new URL(cbUrl);
+                        const hn = cu.hostname.toLowerCase();
+                        if (hn === 'localhost' || hn.endsWith('.local') || hn.endsWith('.internal') ||
+                            /^127\./.test(hn) || /^10\./.test(hn) || /^192\.168\./.test(hn) ||
+                            /^172\.(1[6-9]|2\d|3[01])\./.test(hn) || /^169\.254\./.test(hn) || hn === '::1' || hn === '0.0.0.0') {
+                            await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                            return upErr(400, 'invalid_callback_url', 'callback_url must not point to a private/loopback address');
+                        }
+                    } catch(e) {
+                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                        return upErr(400, 'invalid_callback_url', 'callback_url is not a valid URL');
+                    }
+                    if (ua.cred.allow_callback !== 1) {
+                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                        return upErr(400, 'invalid_callback_url', 'callback is disabled for this api key');
+                    }
+                    let wl = [];
+                    try { wl = ua.cred.callback_whitelist ? JSON.parse(ua.cred.callback_whitelist) : []; } catch(e) {}
+                    if (wl.length && !wl.some(u => cbUrl.indexOf(String(u).replace(/\/$/, '')) === 0)) {
+                        await logApiCall(db, ua, request, 400, 'invalid_callback_url');
+                        return upErr(400, 'invalid_callback_url', 'callback_url is not in the whitelist');
+                    }
+                }
+                // 幂等
+                if (dsNo) {
+                    const oldRef = await db.prepare('SELECT * FROM api_order_refs WHERE credential_id=? AND downstream_order_no=?').bind(ua.cred.id, dsNo).first();
+                    if (oldRef) {
+                        const old = await db.prepare('SELECT * FROM orders WHERE id=?').bind(oldRef.order_id).first();
+                        if (old) {
+                            await logApiCall(db, ua, request, 200, 'idempotent_hit');
+                            return jsonRes({ ok: true, order_id: oldRef.id, order_no: old.id,
+                                status: old.status === 1 ? 'delivered' : (old.status === 0 ? 'pending_payment' : 'canceled'),
+                                amount: (parseFloat(old.total_amount) || 0).toFixed(2), currency: 'CNY' });
+                        }
+                    }
+                }
+                const v = await db.prepare('SELECT v.*, p.name as product_name, p.api_enabled, p.active as product_active, p.member_price_enabled FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id=?').bind(skuId).first();
+                if (!v || v.api_enabled !== 1 || v.product_active !== 1) {
+                    await logApiCall(db, ua, request, 400, 'product_unavailable');
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'product_unavailable', error_message: 'product is not available' });
+                }
+                if (v.active !== 1) {
+                    await logApiCall(db, ua, request, 400, 'sku_unavailable');
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'sku is not active' });
+                }
+                // 库存
+                const stock = await upStockOf(v);
+                if (stock < qty) {
+                    await logApiCall(db, ua, request, 400, 'sku_unavailable');
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'insufficient stock' });
+                }
+                // 计价
+                const unit = await apiUnitPrice(db, ua, v, { member_price_enabled: v.member_price_enabled }, qty);
+                const total = Math.round(unit * qty * 100) / 100;
+                // ⚠️ 协议约定：余额不足返回 HTTP 200 + ok:false + payment_failed
+                if ((parseFloat(ua.user.balance) || 0) < total) {
+                    await logApiCall(db, ua, request, 200, 'payment_failed');
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: total.toFixed(2), currency: 'CNY', error_code: 'payment_failed', error_message: 'wallet payment failed: insufficient balance' });
+                }
+                const orderId = uuid();
+                const now = time();
+                // 卡密原子抢占
+                let cards = [];
+                if (v.auto_delivery === 1) {
+                    const cands = (await db.prepare('SELECT id FROM cards WHERE variant_id=? AND status=0 ORDER BY id ASC LIMIT ?').bind(skuId, qty).all()).results || [];
+                    if (cands.length < qty) {
+                        return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'insufficient stock' });
+                    }
+                    const ids = cands.map(c => c.id);
+                    const ph = ids.map(() => '?').join(',');
+                    await db.prepare(`UPDATE cards SET status=1, order_id=? WHERE id IN (${ph}) AND status=0`).bind(orderId, ...ids).run();
+                    cards = (await db.prepare('SELECT id, content FROM cards WHERE order_id=? AND variant_id=? ORDER BY id ASC').bind(orderId, skuId).all()).results || [];
+                    if (cards.length < qty) {
+                        await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=? AND variant_id=?').bind(orderId, skuId).run();
+                        return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: '0.00', currency: 'CNY', error_code: 'sku_unavailable', error_message: 'stock race, please retry' });
+                    }
+                }
+                // 扣余额
+                const dec = await db.prepare('UPDATE users SET balance = balance - ?, updated_at=? WHERE id=? AND balance >= ?').bind(total, now, uid, total).run();
+                if (!dec.success || dec.meta.changes !== 1) {
+                    if (cards.length) await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(orderId).run();
+                    return jsonRes({ ok: false, order_id: 0, order_no: '', status: 'canceled', amount: total.toFixed(2), currency: 'CNY', error_code: 'payment_failed', error_message: 'wallet payment failed: insufficient balance' });
+                }
+                await db.prepare('INSERT INTO orders (id, trade_no, variant_id, product_name, variant_name, price, quantity, total_amount, contact, query_password, payment_method, created_at, status, cards_sent, user_id, order_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                    .bind(orderId, dsNo, skuId, v.product_name, v.name, unit, qty, total.toFixed(2),
+                        ua.user.email || uname, 'api_' + ua.cred.id, 'balance', now, 1,
+                        cards.length ? JSON.stringify(cards.map(c => ({ id: c.id, content: c.content }))) : null, uid, 'api').run();
+                await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+                    .bind(uid, -total, 'api_purchase', 'dujiao 采购 ' + v.product_name + ' x' + qty, orderId, now).run();
+                const refIns = await db.prepare('INSERT INTO api_order_refs (credential_id, order_id, downstream_order_no, trace_id, callback_url, callback_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+                    .bind(ua.cred.id, orderId, dsNo, traceId, cbUrl, cbUrl ? 'pending' : 'none', now).run();
+                // [v3+] 发货完成 → 出站回调（ctx.waitUntil 后台投递，3 次退避重试，不阻塞响应）
+                if (cbUrl && ua.cred.allow_callback !== 0) {
+                    const cbPayload = buildApiCallbackPayload('order.delivered', {
+                        refId: refIns.meta.last_row_id, orderNo: orderId,
+                        downstreamOrderNo: dsNo, traceId, status: 'delivered',
+                        amount: total.toFixed(2),
+                        cards: cards.map(c => stripCardNote(c.content)), deliveredAt: now
+                    });
+                    try { ctx.waitUntil(deliverApiCallback(db, ua.cred, refIns.meta.last_row_id, cbUrl, cbPayload)); } catch (e) {}
+                }
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({ ok: true, order_id: refIns.meta.last_row_id, order_no: orderId,
+                    status: 'delivered', amount: total.toFixed(2), currency: 'CNY' });
+            }
+
+            // ---- GET /api/v1/upstream/orders/{id} ----
+            const ordMatch = path.match(/^\/api\/v1\/upstream\/orders\/(\d+)$/);
+            if (ordMatch && method === 'GET') {
+                const refId = parseInt(ordMatch[1]);
+                const ref = await db.prepare('SELECT * FROM api_order_refs WHERE id=? AND credential_id=?').bind(refId, ua.cred.id).first();
+                if (!ref) { await logApiCall(db, ua, request, 404, 'order_not_found'); return upErr(404, 'product_not_found', 'order not found'); }
+                const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(ref.order_id).first();
+                if (!o) { await logApiCall(db, ua, request, 404, 'order_not_found'); return upErr(404, 'product_not_found', 'order not found'); }
+                let payload = '';
+                try {
+                    const cr = (await db.prepare('SELECT content FROM cards WHERE order_id=? ORDER BY id ASC').bind(ref.order_id).all()).results || [];
+                    payload = cr.map(c => c.content).join('\n');
+                } catch(e) {}
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({
+                    order_id: ref.id, order_no: o.id,
+                    status: o.status === 1 ? 'delivered' : (o.status === 0 ? 'pending_payment' : 'canceled'),
+                    amount: (parseFloat(o.total_amount) || 0).toFixed(2),
+                    refunded_amount: '0.00', currency: 'CNY',
+                    fulfillment: o.status === 1 ? {
+                        type: 'auto', status: 'delivered', payload,
+                        delivery_data: {},
+                        delivered_at: new Date((o.paid_at || o.created_at || 0) * 1000).toISOString()
+                    } : null,
+                    refund_records: []
+                });
+            }
+
+            // ---- POST /api/v1/upstream/orders/{id}/cancel ----
+            const cancelMatch = path.match(/^\/api\/v1\/upstream\/orders\/(\d+)\/cancel$/);
+            if (cancelMatch && method === 'POST') {
+                const refId = parseInt(cancelMatch[1]);
+                const ref = await db.prepare('SELECT * FROM api_order_refs WHERE id=? AND credential_id=?').bind(refId, ua.cred.id).first();
+                if (!ref) { await logApiCall(db, ua, request, 404, 'order_not_found'); return upErr(404, 'product_not_found', 'order not found'); }
+                const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(ref.order_id).first();
+                if (!o) return jsonRes({ ok: false });
+                if (o.status !== 0) { await logApiCall(db, ua, request, 409, 'already_paid'); return jsonRes({ ok: false }); }
+                const now = time();
+                await db.prepare('UPDATE cards SET status=0, order_id=NULL WHERE order_id=?').bind(ref.order_id).run();
+                await touchProductsByOrder(db, ref.order_id);
+                await db.prepare('UPDATE users SET balance = balance + ?, updated_at=? WHERE id=?').bind(o.total_amount, now, uid).run();
+                await db.prepare('INSERT INTO balance_transactions (user_id, amount, type, description, order_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+                    .bind(uid, parseFloat(o.total_amount), 'api_refund', 'dujiao 取消订单退回余额', ref.order_id, now).run();
+                await db.prepare('UPDATE orders SET status=2 WHERE id=?').bind(ref.order_id).run();
+                await logApiCall(db, ua, request, 200);
+                return jsonRes({ ok: true });
+            }
+
+            await logApiCall(db, ua, request, 404, 'not_found');
+            return upErr(404, 'product_not_found', 'endpoint not found');
+        }
+
                 // --- 开放 API (Open) /api/open/v1/* ---
         // ===========================
         if (path.startsWith('/api/open/v1/')) {
@@ -4113,8 +4627,20 @@ async function handleApi(request, env, url, ctx) {
                 const summary = [];
                 for (const conn of conns) {
                     const row = { connection_id: conn.id, name: conn.name, ping_ok: false, products: 0, skus: 0, created: 0, updated: 0, error: null };
-                    if ((conn.protocol || 'dujiao-next') !== 'dujiao-next') {
-                        row.error = '采购方客户端目前只支持 dujiao-next 协议，连接 ' + (conn.protocol || 'open-v1') + ' 请手动维护';
+                    const cProto = (conn.protocol || 'dujiao-next');
+                    // [v4] 采购方协议分派：acg-faka / open-v1 已支持自动同步；mcy-shop 依赖其第三方货源插件（无稳定公开契约）暂需手动
+                    if (cProto === 'acg-faka') {
+                        try { await acgUpstreamSync(db, conn, row); } catch (e) { row.error = String((e && e.message) || e); }
+                        summary.push(row);
+                        continue;
+                    }
+                    if (cProto === 'open-v1') {
+                        try { await openUpstreamSync(db, conn, row); } catch (e) { row.error = String((e && e.message) || e); }
+                        summary.push(row);
+                        continue;
+                    }
+                    if (cProto !== 'dujiao-next') {
+                        row.error = '协议 ' + cProto + ' 暂不支持自动同步（mcy-shop 上游依赖其第三方货源插件），请手动维护';
                         summary.push(row);
                         continue;
                     }
@@ -4136,12 +4662,13 @@ async function handleApi(request, env, url, ctx) {
                                 for (const sk of skus) {
                                     row.skus++;
                                     const extSku = String(sk.id);
+                                    const skTitle = upstreamSkuTitle(it, sk);
                                     const map = await db.prepare('SELECT * FROM upstream_items WHERE connection_id=? AND upstream_sku_id=?')
                                         .bind(conn.id, extSku).first();
                                     const now2 = time();
                                     if (map && map.local_variant_id) {
                                         await db.prepare('UPDATE upstream_items SET name=?, price=?, stock=?, upstream_product_id=?, updated_at=? WHERE id=?')
-                                            .bind(title + ' / ' + (sk.name || ''), parseFloat(sk.price_amount) || 0,
+                                            .bind(title + ' / ' + skTitle, parseFloat(sk.price_amount) || 0,
                                                 parseInt(sk.stock_quantity) || 0, String(it.id), now2, map.id).run();
                                         row.updated++;
                                     } else {
@@ -4149,10 +4676,10 @@ async function handleApi(request, env, url, ctx) {
                                         const prodIns = await db.prepare('INSERT INTO products (category_id, name, description, sort, active, created_at, updated_at, member_price_enabled, api_enabled) VALUES (1, ?, ?, 0, 1, ?, ?, 1, 0)')
                                             .bind(title, '[上游代销] ' + title, now2, now2).run();
                                         const varIns = await db.prepare('INSERT INTO variants (product_id, name, price, stock, auto_delivery, created_at, updated_at, active) VALUES (?, ?, ?, 0, 1, ?, ?, 1)')
-                                            .bind(prodIns.meta.last_row_id, sk.name || (title + ' ' + extSku), parseFloat(sk.price_amount) || 0, now2, now2).run();
+                                            .bind(prodIns.meta.last_row_id, skTitle || (title + ' ' + extSku), parseFloat(sk.price_amount) || 0, now2, now2).run();
                                         await db.prepare('INSERT INTO upstream_items (connection_id, upstream_product_id, upstream_sku_id, local_product_id, local_variant_id, name, price, stock, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
                                             .bind(conn.id, String(it.id), extSku, prodIns.meta.last_row_id, varIns.meta.last_row_id,
-                                                title + ' / ' + (sk.name || ''), parseFloat(sk.price_amount) || 0,
+                                                title + ' / ' + skTitle, parseFloat(sk.price_amount) || 0,
                                                 parseInt(sk.stock_quantity) || 0, now2, now2).run();
                                         row.created++;
                                     }
@@ -4182,25 +4709,55 @@ async function handleApi(request, env, url, ctx) {
                 if (qty < 1 || qty > 500) return errRes('采购数量需在 1-500 之间');
                 const conn = await db.prepare('SELECT * FROM upstream_connections WHERE id=? AND enabled=1').bind(connId).first();
                 if (!conn) return errRes('上游连接不存在或已禁用');
-                if ((conn.protocol || 'dujiao-next') !== 'dujiao-next') return errRes('采购方客户端目前只支持 dujiao-next 协议');
+                const pProto = (conn.protocol || 'dujiao-next');
                 const map = await db.prepare('SELECT * FROM upstream_items WHERE connection_id=? AND local_variant_id=?').bind(connId, variantId).first();
                 if (!map) return errRes('该本地规格未绑定上游 SKU，请先执行 sync');
-                const skuId = parseInt(map.upstream_sku_id);
-                if (!skuId) return errRes('上游 SKU ID 非法：' + map.upstream_sku_id);
-                // 下单（downstream_order_no 幂等，防重复采购）
+                // 下单（下游订单号幂等，防重复采购/重复扣款）
                 const dsNo = ('buy-' + connId + '-' + variantId + '-' + time()).substring(0, 64);
-                const od = await upstreamSignedFetch(conn, 'POST', '/api/v1/upstream/orders', {
-                    sku_id: skuId, quantity: qty, downstream_order_no: dsNo, trace_id: 'admin_purchase'
-                });
-                const odData = od.data || {};
-                if (!odData.ok) {
-                    return errRes('上游下单失败：' + (odData.error_message || ('HTTP ' + od.status)));
+                let lines = [], upNo = null, upStatus = 'unknown';
+                if (pProto === 'acg-faka') {
+                    // [v4] acg-faka 协议：trade 即时返回 data.secret=卡密文本；upstream_sku_id 存「code#race」（单规格 code#-）
+                    const parts = String(map.upstream_sku_id).split('#');
+                    const aCode = parts[0] || '';
+                    const aRace = (!parts[1] || parts[1] === '-') ? '' : parts[1];
+                    const tr = await acgUpstreamFetch(conn, '/shared/commodity/trade', {
+                        shared_code: aCode, race: aRace, num: String(qty), request_no: dsNo,
+                        contact: 'auto_purchase', card_id: '0', device: '0', password: ''
+                    });
+                    if (!tr.ok) return errRes('上游下单失败：' + (tr.msg || ('HTTP ' + tr.status)));
+                    lines = String((tr.data && tr.data.secret) || '').split('\n').map(s => s.trim()).filter(Boolean);
+                    upNo = (tr.data && tr.data.trade_no) || null;
+                    upStatus = lines.length ? 'delivered' : 'pending';
+                } else if (pProto === 'open-v1') {
+                    // [v4] open-v1 通用协议：order/create 响应直接带 cards
+                    const od4 = await openUpstreamFetch(conn, '/api/open/v1/order/create', {
+                        goods_id: parseInt(map.upstream_product_id) || 0,
+                        variant_id: parseInt(map.upstream_sku_id) || 0,
+                        num: qty, out_trade_no: dsNo
+                    });
+                    if (!od4.ok) return errRes('上游下单失败：' + (od4.msg || ('HTTP ' + od4.status)));
+                    lines = ((od4.data && od4.data.cards) || []).map(c => String(c).trim()).filter(Boolean);
+                    upNo = (od4.data && (od4.data.order_no || od4.data.order_id)) || null;
+                    upStatus = (od4.data && od4.data.status) || (lines.length ? 'delivered' : 'pending');
+                } else {
+                    // dujiao-next（默认）
+                    const skuId = parseInt(map.upstream_sku_id);
+                    if (!skuId) return errRes('上游 SKU ID 非法：' + map.upstream_sku_id);
+                    const od = await upstreamSignedFetch(conn, 'POST', '/api/v1/upstream/orders', {
+                        sku_id: skuId, quantity: qty, downstream_order_no: dsNo, trace_id: 'admin_purchase'
+                    });
+                    const odData = od.data || {};
+                    if (!odData.ok) {
+                        return errRes('上游下单失败：' + (odData.error_message || ('HTTP ' + od.status)));
+                    }
+                    // 查单取卡密（协议：创建订单响应不带 fulfillment）
+                    const detail = await upstreamSignedFetch(conn, 'GET', '/api/v1/upstream/orders/' + encodeURIComponent(odData.order_id), null);
+                    const d = detail.data || {};
+                    const payload = (d.fulfillment && d.fulfillment.payload) || '';
+                    lines = String(payload).split('\n').map(s => s.trim()).filter(Boolean);
+                    upNo = odData.order_no || null;
+                    upStatus = d.status || odData.status || 'unknown';
                 }
-                // 查单取卡密（协议：创建订单响应不带 fulfillment）
-                const detail = await upstreamSignedFetch(conn, 'GET', '/api/v1/upstream/orders/' + encodeURIComponent(odData.order_id), null);
-                const d = detail.data || {};
-                const payload = (d.fulfillment && d.fulfillment.payload) || '';
-                const lines = String(payload).split('\n').map(s => s.trim()).filter(Boolean);
                 let imported = 0;
                 const now3 = time();
                 for (const line of lines) {
@@ -4219,8 +4776,8 @@ async function handleApi(request, env, url, ctx) {
                     .bind(parseInt(map.stock) || 0, now3, map.id).run();
                 return jsonRes({
                     success: true,
-                    upstream_order_no: odData.order_no || null,
-                    upstream_status: d.status || odData.status || 'unknown',
+                    upstream_order_no: upNo,
+                    upstream_status: upStatus,
                     requested: qty,
                     imported,
                     note: imported === 0 ? '上游未返回卡密内容，请到查单确认发货状态' : '卡密已入本地库存（未售出状态）'
